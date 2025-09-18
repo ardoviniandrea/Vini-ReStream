@@ -243,7 +243,7 @@
                     updateStatus(true, url);
                 } else {
                     logMessage(data.error || 'Failed to start stream', true);
-D                }
+                }
             } catch (error) {
                 console.error('Error starting stream:', error);
                 logMessage('Error starting stream', true);
@@ -317,14 +317,23 @@ D                }
                 viewers.forEach(viewer => {
                     const row = document.createElement('tr');
                     row.className = "hover:bg-gray-700 transition-colors duration-150";
+
+                    // --- MODIFIED: Button logic ---
+                    const isBlocked = viewer.isBlocked;
+                    const buttonHtml = isBlocked
+                        ? `<button class="bg-gray-500 text-gray-300 text-xs font-bold py-1 px-2 rounded-md cursor-not-allowed" disabled>
+                               Terminated
+                           </button>`
+                        : `<button class="terminate-btn bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded-md shadow" data-ip="${viewer.ip}">
+                               Terminate
+                           </button>`;
+
                     row.innerHTML = `
                         <td class="p-3 text-sm text-gray-200 font-mono">${viewer.ip}</td>
                         <td class="p-3 text-sm text-gray-300">${formatTimeAgo(viewer.firstSeen)}</td>
                         <td class="p-3 text-sm text-green-400 font-medium">${formatTimeAgo(viewer.lastSeen)}</td>
                         <td class="p-3 text-sm">
-                            <button class="terminate-btn bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded-md shadow" data-ip="${viewer.ip}">
-                                Terminate
-                            </button>
+                            ${buttonHtml}
                         </td>
                     `;
                     viewerTableBody.appendChild(row);
@@ -379,7 +388,8 @@ D                }
                     logMessage(data.message || `Terminated ${ipToTerminate}`);
                     fetchViewers(); // Refresh the list immediately
                 } else {
-                    logMessage(data.error || 'Failed to terminate', true);
+                    // Log the 409 error message from the server
+                    logMessage(data.message || data.error || 'Failed to terminate', true);
                 }
             } catch (error) {
                 console.error('Error terminating IP:', error);
