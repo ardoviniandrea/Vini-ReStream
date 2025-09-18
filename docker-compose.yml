@@ -8,3 +8,13 @@ services:
       # 8994 for the HLS Stream (served by Nginx)
       - "8994:8994"
     restart: unless-stopped
+    # --- NEW: Add persistent volume mount ---
+    # Mounts the 'restream-data' volume to the '/data' directory in the container.
+    # This is where we will store the SQLite database.
+    volumes:
+      - restream-data:/data
+
+# --- NEW: Define the named volume ---
+# This tells Docker to manage a persistent volume named 'restream-data'.
+volumes:
+  restream-data:
