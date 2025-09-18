@@ -24,6 +24,14 @@ RUN mkdir -p /var/www/hls && \
     # Give the node user (which npm runs as) permission to write to it
     chown -R node:node /var/www/hls
 
+# --- NEW ---
+# Create Nginx log dir, hls_access.log, and blocklist.conf
+RUN mkdir -p /var/log/nginx && \
+    touch /var/log/nginx/hls_access.log && \
+    touch /etc/nginx/blocklist.conf && \
+    # Give node user permission to read the log and write to the blocklist
+    chown -R node:node /var/log/nginx /etc/nginx/blocklist.conf
+
 # Expose the new ports
 EXPOSE 8995
 EXPOSE 8994
