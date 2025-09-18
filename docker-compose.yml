@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  vini-restream:
+    # We'll build the new Dockerfile in the project's root
+    build: .
+    ports:
+      # 8995 for the UI (proxied by Nginx)
+      - "8995:8995"
+      # 8994 for the HLS Stream (served by Nginx)
+      - "8994:8994"
+    restart: unless-stopped
+    # No external volumes needed, it's all self-contained!
+
