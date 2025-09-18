@@ -1,6 +1,6 @@
 services:
   vini-restream:
-
+    container_name: vini-restream
     image: ghcr.io/ardoviniandrea/vini-restream:latest
     ports:
       # 8995 for the UI (proxied by Nginx)
