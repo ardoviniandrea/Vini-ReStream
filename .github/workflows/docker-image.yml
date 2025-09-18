@@ -1,0 +1,69 @@
+# This GitHub Actions workflow automates building and pushing your Docker image.
+#
+# It pushes to two different container registries:
+# 1. GitHub Container Registry (ghcr.io)
+# 2. Docker Hub (docker.io)
+#
+# TRIGGERS:
+# 1. On a push to the 'main' branch:
+#    - The image will be tagged as 'latest'.
+# 2. When a new tag is pushed in the format 'v*.*.*' (e.g., v0.5.0, v1.0.0):
+#    - The image will be tagged with the corresponding version number (e.g., 0.5.0, 1.0.0).
+#
+name: Docker Image CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*.*.*' # Trigger on version tags like v1.0, v1.2.3
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags and labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # We'll tag the image as 'viniplay' in both registries
+          images: |
+            ghcr.io/${{ github.repository_owner }}/viniplay
+            ${{ secrets.DOCKERHUB_USERNAME }}/viniplay
+          tags: |
+            # Creates the 'latest' tag when a push is made to the default branch (main).
+            type=raw,value=latest,enable={{is_default_branch}}
+
+            # Creates version tags when a git tag is pushed (e.g., v1.2.3 -> 1.2.3 and 1.2).
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }} # Don't push on pull requests
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
