@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Stream Control</title>
+    <!-- Updated title and added favicon -->
+    <title>Vini ReStream Control</title>
+    <link rel="icon" type="image/png" href="https://i.imgur.com/qqjoPdW.png">
+    
     <!-- Using Tailwind CSS for a clean UI -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -13,9 +16,14 @@
         }
     </style>
 </head>
-<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
     <div class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-lg">
-        <h1 class="text-3xl font-bold text-center mb-6 text-indigo-400">Live Stream Control Panel</h1>
+        
+        <!-- New Header with Logo and Title -->
+        <div class="flex items-center justify-center mb-6 space-x-3">
+            <img src="https://i.imgur.com/qqjoPdW.png" alt="Vini ReStream Logo" class="h-10 w-10 rounded-lg shadow-md" onerror="this.style.display='none'">
+            <h1 class="text-3xl font-bold text-center text-indigo-400">Vini ReStream</h1>
+        </div>
 
         <!-- Status Indicator -->
         <div class="mb-6 p-4 rounded-lg flex items-center justify-center border" id="status-indicator">
@@ -31,10 +39,10 @@
 
         <!-- Action Buttons -->
         <div class="flex space-x-4 mb-6">
-            <button id="start-btn" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300">
+            <button id="start-btn" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 shadow-lg hover:shadow-indigo-500/50">
                 Start Stream
             </button>
-            <button id="stop-btn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300">
+            <button id="stop-btn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 shadow-lg hover:shadow-red-500/50">
                 Stop Stream
             </button>
         </div>
@@ -90,8 +98,8 @@
 
         function updateStatus(running, url = "") {
             if (running) {
-                statusIndicator.classList.remove('bg-red-900', 'border-red-500');
-                statusIndicator.classList.add('bg-green-900', 'border-green-500');
+                statusIndicator.classList.remove('border-red-500');
+                statusIndicator.classList.add('border-green-500');
                 statusIndicator.style.borderColor = 'rgba(34, 197, 94, 0.5)';
                 statusIndicator.style.background = 'rgba(34, 197, 94, 0.1)';
                 statusDot.classList.remove('bg-red-500');
@@ -100,8 +108,8 @@
                 shareLinkBox.style.display = 'block';
                 streamUrlInput.value = url; // Show the currently streaming URL
             } else {
-                statusIndicator.classList.remove('bg-green-900', 'border-green-500');
-                statusIndicator.classList.add('bg-red-900', 'border-red-500');
+                statusIndicator.classList.remove('border-green-500');
+                statusIndicator.classList.add('border-red-500');
                 statusIndicator.style.borderColor = 'rgba(239, 68, 68, 0.5)';
                 statusIndicator.style.background = 'rgba(239, 68, 68, 0.1)';
                 statusDot.classList.remove('bg-green-500');
@@ -114,11 +122,15 @@
         async function checkStatus() {
             try {
                 const response = await fetch(`${apiUrl}/status`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const data = await response.json();
                 updateStatus(data.running, data.url);
             } catch (error) {
                 console.error('Failed to check status:', error);
                 logMessage('Cannot connect to server', true);
+                updateStatus(false); // Set to offline if status check fails
             }
         }
 
@@ -143,6 +155,7 @@
                     logMessage(data.error || 'Failed to start stream', true);
                 }
             } catch (error) {
+                console.error('Error starting stream:', error);
                 logMessage('Error starting stream', true);
             }
         });
@@ -159,6 +172,7 @@
                     logMessage(data.error || 'Failed to stop stream', true);
                 }
             } catch (error) {
+                console.error('Error stopping stream:', error);
                 logMessage('Error stopping stream', true);
             }
         });
@@ -183,4 +197,3 @@
     </script>
 </body>
 </html>
-
