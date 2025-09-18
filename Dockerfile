@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
-# Install dependencies: ffmpeg (for streaming), nginx (for serving), supervisor (for process management)
-RUN apk add --no-cache ffmpeg nginx supervisor
+# Install dependencies: ffmpeg, nginx, supervisor, AND sqlite-dev
+RUN apk add --no-cache ffmpeg nginx supervisor sqlite-dev
 
 # Set up the working directory for the Node.js app
 WORKDIR /usr/src/app
@@ -24,7 +24,11 @@ RUN mkdir -p /var/www/hls && \
     # Give the node user (which npm runs as) permission to write to it
     chown -R node:node /var/www/hls
 
-# --- NEW ---
+# --- NEW: Create /data directory for persistent database ---
+RUN mkdir -p /data && \
+    # Give the node user permission to write the database
+    chown -R node:node /data
+
 # Create Nginx log dir, hls_access.log, and blocklist.conf
 RUN mkdir -p /var/log/nginx && \
     touch /var/log/nginx/hls_access.log && \
