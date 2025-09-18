@@ -144,12 +144,27 @@ app.get('/api/status', (req, res) => {
 });
 
 
-// --- NEW ENDPOINT: /api/viewers ---
+// --- MODIFIED ENDPOINT: /api/viewers ---
 app.get('/api/viewers', (req, res) => {
     if (!ffmpegProcess) {
         return res.json([]); // No stream running, no viewers
     }
 
+    // First, read the blocklist
+    let blockedIps = new Set();
+    try {
+        const blocklistData = fs.readFileSync(BLOCKLIST_PATH, 'utf8');
+        const blocklistLines = blocklistData.split('\n');
+        for (const line of blocklistLines) {
+            if (line.startsWith('deny ')) {
+                blockedIps.add(line.substring(5, line.length - 1)); // 'deny 1.2.3.4;' -> '1.2.3.4'
+            }
+        }
+    } catch (readErr) {
+        console.error('Failed to read blocklist, continuing without it.', readErr);
+    }
+
+    // Now, read the access log
     fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
         if (err) {
             console.error('Failed to read HLS log:', err);
@@ -179,13 +194,21 @@ app.get('/api/viewers', (req, res) => {
             }
 
             // Update viewer's last seen time
-            const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp };
+            const viewer = viewers.get(ip) || { 
+                ip, 
+                firstSeen: timestamp, 
+                lastSeen: timestamp,
+                isBlocked: blockedIps.has(ip) // Check if IP is in the set
+            };
+
             if (timestamp > viewer.lastSeen) {
                 viewer.lastSeen = timestamp;
             }
             if (timestamp < viewer.firstSeen) {
                 viewer.firstSeen = timestamp;
             }
+            // Ensure isBlocked status is up-to-date
+            viewer.isBlocked = blockedIps.has(ip); 
             viewers.set(ip, viewer);
         }
 
@@ -216,6 +239,7 @@ app.post('/api/terminate', (req, res) => {
         }
 
         if (data.includes(`deny ${ip};`)) {
+            // This is the 409 Conflict you were seeing
             return res.status(409).json({ message: `${ip} is already blocked.` });
         }
 
@@ -243,3 +267,4 @@ app.listen(port, '127.0.0.1', () => {
     // Listens on localhost only, Nginx will handle public traffic
     console.log(`Stream control API listening on port ${port}`);
 });
+
