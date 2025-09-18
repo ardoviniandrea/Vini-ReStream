@@ -40,7 +40,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           # We'll tag the image as 'viniplay' in the GHCR registry
-          images: ghcr.io/${{ github.repository_owner }}/viniplay
+          images: ghcr.io/${{ github.repository_owner }}/vini-restream
           tags: |
             # Creates the 'latest' tag when a push is made to the default branch (main).
             type=raw,value=latest,enable={{is_default_branch}}
