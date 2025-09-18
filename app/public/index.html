@@ -81,7 +81,7 @@
       Visible by default, hidden after login
       ================================================================
     -->
-    <div id="auth-container" class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-md">
+    <div id="auth-container" class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-md" style="display: none;">
         <!-- Header -->
         <div class="flex items-center justify-center mb-6 space-x-3">
             <img src="https://i.imgur.com/qqjoPdW.png" alt="Vini ReStream Logo" class="h-10 w-10 rounded-lg shadow-md" onerror="this.style.display='none'">
@@ -514,6 +514,9 @@
                 stopViewerCheck();
                 // Check auth status again (will show login panel)
                 await checkAuthStatus();
+                // Clear inputs
+                authUsernameInput.value = '';
+                authPasswordInput.value = '';
             }
         }
 
@@ -525,6 +528,12 @@
                 const response = await fetch(`${apiUrl}/users`);
                 if (!response.ok) {
                     const data = await response.json();
+                    // Handle session expiry
+                    if (response.status === 401) {
+                        logAuthMessage(data.error || 'Session expired. Please log in.');
+                        await handleLogout();
+                        return;
+                    }
                     throw new Error(data.error || 'Failed to fetch users');
                 }
                 const users = await response.json();
@@ -585,6 +594,12 @@
                     newPasswordInput.value = '';
                     await fetchUsers(); // Refresh list
                 } else {
+                    // Handle session expiry
+                    if (response.status === 401) {
+                        logAuthMessage(data.error || 'Session expired. Please log in.');
+                        await handleLogout();
+                        return;
+                    }
                     logUserMessage(data.error || 'Failed to create user', true);
                 }
             } catch (error) {
@@ -603,6 +618,12 @@
                     logUserMessage(`User '${username}' deleted.`, false);
                     await fetchUsers(); // Refresh list
                 } else {
+                    // Handle session expiry
+                    if (response.status === 401) {
+                        logAuthMessage(data.error || 'Session expired. Please log in.');
+                        await handleLogout();
+                        return;
+                    }
                     logUserMessage(data.error || 'Failed to delete user', true);
                 }
             } catch (error) {
@@ -685,6 +706,11 @@
                     logStreamMessage('Stream started!', false);
                     updateStatus(true, url);
                 } else {
+                    if (response.status === 401) {
+                        logAuthMessage(data.error || 'Session expired. Please log in.');
+                        await handleLogout();
+                        return;
+                    }
                     logStreamMessage(data.error || 'Failed to start stream', true);
                 }
             } catch (error) {
@@ -702,6 +728,11 @@
                     updateStatus(false);
                     streamUrlInput.value = '';
                 } else {
+                    if (response.status === 401) {
+                        logAuthMessage(data.error || 'Session expired. Please log in.');
+                        await handleLogout();
+                        return;
+                    }
                     logStreamMessage(data.error || 'Failed to stop stream', true);
                 }
             } catch (error) {
@@ -810,6 +841,11 @@
                     logStreamMessage(data.message || `Terminated ${ip}`, false);
                     fetchViewers();
                 } else {
+                    if (response.status === 401) {
+                        logAuthMessage(data.error || 'Session expired. Please log in.');
+                        await handleLogout();
+                        return;
+                    }
                     logStreamMessage(data.message || data.error || 'Failed to terminate', true);
                 }
             } catch (error) {
@@ -889,428 +925,12 @@
         });
 
         // --- Initial Load ---
+        // On load, set the auth container to display:block so it's visible while checking
+        authContainer.style.display = 'block';
         // Check status on page load
         document.addEventListener('DOMContentLoaded', checkAuthStatus);
         
         // And check stream status every 10 seconds (if logged in)
-        setInterval(checkStatus, 10000);
-    </script>
-</body>
-</html>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Updated title and added favicon -->
-    <title>Vini ReStream Control</title>
-    <link rel="icon" type="image/png" href="https://i.imgur.com/qqjoPdW.png">
-    
-    <!-- Using Tailwind CSS for a clean UI -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        html, body {
-            height: 100%;
-            font-family: 'Inter', sans-serif, system-ui;
-        }
-        /* Custom styles for the modal */
-        #confirmation-modal {
-            transition: opacity 0.2s ease-in-out;
-        }
-        #confirmation-modal.hidden {
-            opacity: 0;
-            pointer-events: none;
-        }
-        #confirmation-modal.visible {
-            opacity: 1;
-            pointer-events: auto;
-        }
-        /* Style for table */
-        #viewer-table th, #viewer-table td {
-            padding: 0.75rem;
-            border-bottom-width: 1px;
-            border-color: #4b5563; /* gray-600 */
-        }
-        #viewer-table th {
-            background-color: #374151; /* gray-700 */
-            text-align: left;
-            font-weight: 600;
-        }
-        #viewer-table td {
-            background-color: #1f2937; /* gray-800 */
-        }
-        #viewer-table tr:last-child td {
-            border-bottom: none;
-        }
-    </style>
-</head>
-<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
-    <!-- Changed max-w-lg to max-w-3xl to make space for the table -->
-    <div class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-3xl">
-        
-        <!-- New Header with Logo and Title -->
-        <div class="flex items-center justify-center mb-6 space-x-3">
-            <img src="https://i.imgur.com/qqjoPdW.png" alt="Vini ReStream Logo" class="h-10 w-10 rounded-lg shadow-md" onerror="this.style.display='none'">
-            <h1 class="text-3xl font-bold text-center text-indigo-400">Vini ReStream</h1>
-        </div>
-
-        <!-- Status Indicator -->
-        <div class="mb-6 p-4 rounded-lg flex items-center justify-center border" id="status-indicator">
-            <div class="h-4 w-4 rounded-full bg-red-500 mr-3" id="status-dot"></div>
-            <span class="font-medium text-lg" id="status-text">Stream is OFFLINE</span>
-        </div>
-
-        <!-- URL Input -->
-        <div class="mb-4">
-            <label for="stream-url" class="block text-sm font-medium text-gray-300 mb-2">Authenticated Stream Link (40s expiry)</label>
-            <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your .m3u8 or .mpd link here...">
-        </div>
-
-        <!-- Action Buttons -->
-        <div class="flex space-x-4 mb-6">
-            <button id="start-btn" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 shadow-lg hover:shadow-indigo-500/50">
-                Start Stream
-            </button>
-            <button id="stop-btn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 shadow-lg hover:shadow-red-500/50">
-                Stop Stream
-            </button>
-        </div>
-
-        <!-- Shareable Link -->
-        <div class="bg-gray-900 p-4 rounded-lg" id="share-link-box" style="display: none;">
-            <label class="block text-sm font-medium text-gray-400 mb-2">Shareable Stream Link (VLC, etc.)</Vlabel>
-            <div class="flex">
-                <input type="text" id="share-link" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-l-lg text-gray-200 focus:outline-none" readonly>
-                <button id="copy-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-r-lg">Copy</button>
-            </div>
-            <p id="copy-feedback" class="text-green-400 text-sm mt-2" style="display: none;">Copied to clipboard!</p>
-        </div>
-
-        <!-- Message Log -->
-        <div id="message-log" class="text-center text-gray-400 mt-4 text-sm h-5"></div>
-
-        <!-- NEW: Viewer List -->
-        <div id="viewer-list-container" class="mt-8" style="display: none;">
-            <h2 class="text-2xl font-bold mb-4 text-indigo-300">Active Viewers (<span id="viewer-count">0</span>)</h2>
-            <div class="overflow-hidden rounded-lg shadow-md border border-gray-700">
-                <table id="viewer-table" class="w-full">
-                    <thead class="bg-gray-700">
-                        <tr>
-                            <th class="p-3 text-left text-sm font-semibold text-gray-300 uppercase tracking-wider">IP Address</th>
-                            <th class="p-3 text-left text-sm font-semibold text-gray-300 uppercase tracking-wider">First Seen</th>
-                            <th class="p-3 text-left text-sm font-semibold text-gray-300 uppercase tracking-wider">Last Seen</th>
-                            <th class="p-3 text-left text-sm font-semibold text-gray-300 uppercase tracking-wider">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody id="viewer-table-body" class="bg-gray-800 divide-y divide-gray-700">
-                        <!-- Rows will be injected here -->
-                        <tr id="no-viewers-row">
-                            <td colspan="4" class="p-4 text-center text-gray-400">No active viewers.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- NEW: Confirmation Modal -->
-    <div id="confirmation-modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 hidden">
-        <div class="bg-gray-800 rounded-lg shadow-2xl p-6 w-full max-w-sm">
-            <h3 class="text-xl font-bold mb-4">Confirm Termination</h3>
-            <p class="text-gray-300 mb-6">Are you sure you want to terminate the stream for <strong id="modal-ip-address" class="text-red-400"></strong>? This action is irreversible.</p>
-            <div class="flex justify-end space-x-3">
-                <button id="modal-cancel-btn" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">Cancel</button>
-                <button id="modal-confirm-btn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">Terminate</button>
-            </div>
-        </div>
-    </div>
-
-
-    <script>
-        // The API is on the same host, served from the root
-        const apiUrl = '/api'; 
-        const streamUrlInput = document.getElementById('stream-url');
-        const startBtn = document.getElementById('start-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        
-        // Status UI
-        const statusIndicator = document.getElementById('status-indicator');
-        const statusDot = document.getElementById('status-dot');
-        const statusText = document.getElementById('status-text');
-        
-        // Share Link UI
-        const shareLinkBox = document.getElementById('share-link-box');
-        const shareLink = document.getElementById('share-link');
-        const copyBtn = document.getElementById('copy-btn');
-        const copyFeedback = document.getElementById('copy-feedback');
-
-        // Message Log
-        const messageLog = document.getElementById('message-log');
-
-        // --- NEW: Viewer List UI ---
-        const viewerListContainer = document.getElementById('viewer-list-container');
-        const viewerCount = document.getElementById('viewer-count');
-        const viewerTableBody = document.getElementById('viewer-table-body');
-        const noViewersRow = document.getElementById('no-viewers-row');
-        let viewerCheckInterval = null;
-
-        // --- NEW: Modal UI ---
-        const modal = document.getElementById('confirmation-modal');
-        const modalIp = document.getElementById('modal-ip-address');
-        const modalCancelBtn = document.getElementById('modal-cancel-btn');
-        const modalConfirmBtn = document.getElementById('modal-confirm-btn');
-        let ipToTerminate = null;
-
-
-        // Updated to use the new stream port 8994
-        const publicStreamUrl = `http://${window.location.hostname}:8994/live.m3u8`;
-        shareLink.value = publicStreamUrl;
-
-        function logMessage(message, isError = false) {
-            messageLog.textContent = message;
-            messageLog.className = isError 
-                ? 'text-center text-red-400 mt-4 text-sm h-5' 
-                : 'text-center text-green-400 mt-4 text-sm h-5';
-            
-            setTimeout(() => { messageLog.textContent = ''; }, 4000);
-        }
-
-        function updateStatus(running, url = "") {
-            if (running) {
-                statusIndicator.classList.remove('border-red-500');
-                statusIndicator.classList.add('border-green-500');
-                statusIndicator.style.borderColor = 'rgba(34, 197, 94, 0.5)';
-                statusIndicator.style.background = 'rgba(34, 197, 94, 0.1)';
-                statusDot.classList.remove('bg-red-500');
-                statusDot.classList.add('bg-green-500');
-                statusText.textContent = 'Stream is LIVE';
-                shareLinkBox.style.display = 'block';
-                streamUrlInput.value = url; // Show the currently streaming URL
-                
-                // --- NEW ---
-                viewerListContainer.style.display = 'block';
-                startViewerCheck();
-                fetchViewers(); // Fetch immediately
-            } else {
-                statusIndicator.classList.remove('border-green-500');
-                statusIndicator.classList.add('border-red-500');
-                statusIndicator.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-                statusIndicator.style.background = 'rgba(239, 68, 68, 0.1)';
-                statusDot.classList.remove('bg-green-500');
-                statusDot.classList.add('bg-red-500');
-                statusText.textContent = 'Stream is OFFLINE';
-                shareLinkBox.style.display = 'none';
-                
-                // --- NEW ---
-                viewerListContainer.style.display = 'none';
-                stopViewerCheck();
-                clearViewerTable();
-            }
-        }
-
-        async function checkStatus() {
-            try {
-                const response = await fetch(`${apiUrl}/status`);
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                updateStatus(data.running, data.url);
-            } catch (error) {
-                console.error('Failed to check status:', error);
-                logMessage('Cannot connect to server', true);
-                updateStatus(false); // Set to offline if status check fails
-            }
-        }
-
-        startBtn.addEventListener('click', async () => {
-            const url = streamUrlInput.value;
-            if (!url) {
-                logMessage('Please paste the stream link first', true);
-                return;
-            }
-
-            try {
-                const response = await fetch(`${apiUrl}/start`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
-                });
-                const data = await response.json();
-                if (response.ok) {
-                    logMessage('Stream started!');
-                    updateStatus(true, url);
-                } else {
-                    logMessage(data.error || 'Failed to start stream', true);
-                }
-            } catch (error) {
-                console.error('Error starting stream:', error);
-                logMessage('Error starting stream', true);
-            }
-        });
-
-        stopBtn.addEventListener('click', async () => {
-            try {
-                const response = await fetch(`${apiUrl}/stop`, { method: 'POST' });
-                const data = await response.json();
-                if (response.ok) {
-                    logMessage('Stream stopped');
-                    updateStatus(false);
-                    streamUrlInput.value = ''; // Clear input after stopping
-                } else {
-                    logMessage(data.error || 'Failed to stop stream', true);
-                }
-            } catch (error) {
-                console.error('Error stopping stream:', error);
-                logMessage('Error stopping stream', true);
-            }
-        });
-
-        copyBtn.addEventListener('click', () => {
-            shareLink.select();
-            // Use execCommand for iframe compatibility
-            try {
-                document.execCommand('copy');
-                copyFeedback.style.display = 'block';
-                setTimeout(() => { copyFeedback.style.display = 'none'; }, 2000);
-            } catch (err) {
-                console.error('Failed to copy text: ', err);
-                logMessage('Failed to copy link', true);
-            }
-        });
-
-        // --- NEW: Viewer List Functions ---
-
-        function formatTimeAgo(timestamp) {
-            const now = Date.now();
-            const seconds = Math.floor((now - timestamp) / 1000);
-            if (seconds < 10) return "just now";
-            if (seconds < 60) return `${seconds}s ago`;
-            const minutes = Math.floor(seconds / 60);
-            if (minutes < 60) return `${minutes}m ago`;
-            const hours = Math.floor(minutes / 60);
-            return `${hours}h ago`;
-        }
-
-        function clearViewerTable() {
-            viewerTableBody.innerHTML = ''; // Clear all rows
-            viewerTableBody.appendChild(noViewersRow); // Add back the 'no viewers' row
-            viewerCount.textContent = '0';
-        }
-
-        async function fetchViewers() {
-            try {
-                const response = await fetch(`${apiUrl}/viewers`);
-                if (!response.ok) {
-                    throw new Error('Failed to fetch viewers');
-                }
-                const viewers = await response.json();
-                viewerCount.textContent = viewers.length;
-                viewerTableBody.innerHTML = ''; // Clear existing rows
-
-                if (viewers.length === 0) {
-                    viewerTableBody.appendChild(noViewersRow);
-                    return;
-                }
-
-                viewers.forEach(viewer => {
-                    const row = document.createElement('tr');
-                    row.className = "hover:bg-gray-700 transition-colors duration-150";
-
-                    // --- MODIFIED: Button logic ---
-                    const isBlocked = viewer.isBlocked;
-                    const buttonHtml = isBlocked
-                        ? `<button class="bg-gray-500 text-gray-300 text-xs font-bold py-1 px-2 rounded-md cursor-not-allowed" disabled>
-                               Terminated
-                           </button>`
-                        : `<button class="terminate-btn bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded-md shadow" data-ip="${viewer.ip}">
-                               Terminate
-                           </button>`;
-
-                    row.innerHTML = `
-                        <td class="p-3 text-sm text-gray-200 font-mono">${viewer.ip}</td>
-                        <td class="p-3 text-sm text-gray-300">${formatTimeAgo(viewer.firstSeen)}</td>
-                        <td class="p-3 text-sm text-green-400 font-medium">${formatTimeAgo(viewer.lastSeen)}</td>
-                        <td class="p-3 text-sm">
-                            ${buttonHtml}
-                        </td>
-                    `;
-                    viewerTableBody.appendChild(row);
-                });
-
-            } catch (error) {
-                console.error('Error fetching viewers:', error);
-                logMessage('Could not update viewer list', true);
-            }
-        }
-
-        function startViewerCheck() {
-            if (viewerCheckInterval) return; // Already running
-            viewerCheckInterval = setInterval(fetchViewers, 5000); // Check every 5 seconds
-        }
-
-        function stopViewerCheck() {
-            if (viewerCheckInterval) {
-                clearInterval(viewerCheckInterval);
-                viewerCheckInterval = null;
-            }
-        }
-
-        // --- NEW: Modal Functions ---
-        function showModal(ip) {
-            ipToTerminate = ip;
-            modalIp.textContent = ip;
-            modal.classList.remove('hidden');
-            modal.classList.add('visible');
-        }
-
-        function hideModal() {
-            ipToTerminate = null;
-            modal.classList.add('hidden');
-            modal.classList.remove('visible');
-        }
-
-        modalCancelBtn.addEventListener('click', hideModal);
-
-        modalConfirmBtn.addEventListener('click', async () => {
-            if (!ipToTerminate) return;
-
-            try {
-                const response = await fetch(`${apiUrl}/terminate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ip: ipToTerminate })
-                });
-                const data = await response.json();
-
-                if (response.ok) {
-                    logMessage(data.message || `Terminated ${ipToTerminate}`);
-                    fetchViewers(); // Refresh the list immediately
-                } else {
-                    // Log the 409 error message from the server
-                    logMessage(data.message || data.error || 'Failed to terminate', true);
-                }
-            } catch (error) {
-                console.error('Error terminating IP:', error);
-                logMessage('Error terminating IP', true);
-            } finally {
-                hideModal();
-            }
-        });
-
-        // Add event listener to table body for terminate buttons (event delegation)
-        viewerTableBody.addEventListener('click', (e) => {
-            if (e.target && e.target.classList.contains('terminate-btn')) {
-                const ip = e.target.getAttribute('data-ip');
-                if (ip) {
-                    showModal(ip);
-                }
-            }
-        });
-
-        // Check status on page load
-        checkStatus();
-        // And check every 10 seconds
         setInterval(checkStatus, 10000);
     </script>
 </body>
