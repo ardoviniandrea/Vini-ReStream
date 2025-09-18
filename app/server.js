@@ -32,15 +32,31 @@ function startStream(streamUrl) {
 
     console.log(`Starting stream from: ${streamUrl}`);
     
-    // --- MODIFIED ---
-    // Updated path to /var/www/hls to match the Nginx config
+    // --- MODIFIED FFMPEG ARGS ---
     const args = [
+        // --- NEW ---
+        // Flags to make the HTTP input more resilient to network drops
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+
+        // Input URL
         '-i', streamUrl,
-        '-c', 'copy', // Copy codec, no re-encoding
+
+        // Copy codec, no re-encoding
+        '-c', 'copy', 
+        
+        // HLS Output flags
         '-f', 'hls',
         '-hls_time', '4', // 4-second segments
         '-hls_list_size', '10', // Keep 10 segments in playlist
-        '-hls_flags', 'delete_segments', // Delete old segments
+
+        // --- MODIFIED ---
+        // 'delete_segments': Delete old segments
+        // 'discont_start': Adds a discontinuity tag when timestamps jump (fixes skipping)
+        // 'omit_endlist': Ensures the stream is always treated as "live"
+        '-hls_flags', 'delete_segments+discont_start+omit_endlist', 
+
         '-hls_segment_filename', '/var/www/hls/segment_%03d.ts',
         '/var/www/hls/live.m3u8' // The output playlist
     ];
@@ -75,7 +91,9 @@ function startStream(streamUrl) {
 
 // Function to reload nginx config
 function reloadNginx() {
-    exec('supervisorctl signal HUP nginx', (err, stdout, stderr) => {
+    // --- MODIFIED ---
+    // Specify the correct config file path for supervisorctl
+    exec('supervisorctl -c /etc/supervisor/conf.d/supervisord.conf signal HUP nginx', (err, stdout, stderr) => {
         if (err) {
             console.error('Failed to reload nginx:', stderr);
         } else {
@@ -267,4 +285,3 @@ app.listen(port, '127.0.0.1', () => {
     // Listens on localhost only, Nginx will handle public traffic
     console.log(`Stream control API listening on port ${port}`);
 });
-
