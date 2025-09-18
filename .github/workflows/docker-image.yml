@@ -1,8 +1,5 @@
-# This GitHub Actions workflow automates building and pushing your Docker image.
-#
-# It pushes to two different container registries:
-# 1. GitHub Container Registry (ghcr.io)
-# 2. Docker Hub (docker.io)
+# This GitHub Actions workflow automates building and pushing your Docker image
+# to the GitHub Container Registry (ghcr.io).
 #
 # TRIGGERS:
 # 1. On a push to the 'main' branch:
@@ -25,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write # This permission is required to push to ghcr.io
 
     steps:
       - name: Checkout repository
@@ -38,20 +35,12 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata (tags and labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # We'll tag the image as 'viniplay' in both registries
-          images: |
-            ghcr.io/${{ github.repository_owner }}/viniplay
-            ${{ secrets.DOCKERHUB_USERNAME }}/viniplay
+          # We'll tag the image as 'viniplay' in the GHCR registry
+          images: ghcr.io/${{ github.repository_owner }}/viniplay
           tags: |
             # Creates the 'latest' tag when a push is made to the default branch (main).
             type=raw,value=latest,enable={{is_default_branch}}
@@ -67,3 +56,4 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }} # Don't push on pull requests
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
