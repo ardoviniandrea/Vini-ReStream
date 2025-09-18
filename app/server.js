@@ -40,6 +40,9 @@ function startStream(streamUrl) {
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
 
+        // --- NEW: Spoof the User-Agent to look like Chrome ---
+        '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+
         // Input URL
         '-i', streamUrl,
 
@@ -285,3 +288,4 @@ app.listen(port, '127.0.0.1', () => {
     // Listens on localhost only, Nginx will handle public traffic
     console.log(`Stream control API listening on port ${port}`);
 });
+
