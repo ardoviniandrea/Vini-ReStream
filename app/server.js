@@ -102,40 +102,38 @@ function startStream(streamUrl) {
 
     console.log(`Starting stream from: ${streamUrl}`);
     
-    // --- MODIFIED FFMPEG COMMAND (Quality & Compatibility Fix) ---
+    // --- MODIFIED FFMPEG COMMAND (Timestamp Fix + Low CPU) ---
     const args = [
         // --- Input Flags (Robustness) ---
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
-        '-fflags', '+discardcorrupt', // Discard corrupted packets from source
+        '-fflags', '+discardcorrupt+genpts', // <--- KEY: Discard corrupt packets AND generate new timestamps
         '-err_detect', 'ignore_err',  // Ignore errors in the source and try to continue
         '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         
         // --- Input Source ---
         '-i', streamUrl,
 
-        // --- NEW: Stream Selection (from logs) ---
-        // 0:3 was the 1280x720 (720p) video stream
-        // 0:5 was the AAC audio stream
+        // --- Stream Selection (from logs) ---
         '-map', '0:3', // Selects 720p video
         '-map', '0:5', // Selects AAC audio
         
         // --- Video Re-encoding (CPU/Compatibility Fix) ---
         '-c:v', 'libx264',       // Re-encode video using x264
-        '-preset', 'veryfast',   // <--- KEY: More stable than ultrafast, good balance
-        '-r', '25',              // <--- KEY: Force 25fps (from 50fps) for massive CPU save
+        '-preset', 'ultrafast',  // <--- KEY: Back to ultrafast for LOW CPU
+        '-r', '25',              // <--- KEY: Force 25fps (from 50fps)
         '-tune', 'zerolatency',  // Optimize for live streaming
         '-pix_fmt', 'yuv420p',   // Standard pixel format for compatibility
         
         // --- Audio (CPU Fix) ---
-        '-c:a', 'copy',          // <--- KEY: Copy audio directly, don't re-encode
+        '-c:a', 'copy',          // Copy audio directly, don't re-encode
         
         // --- HLS Output ---
         '-f', 'hls',
         '-hls_time', '4',
         '-hls_list_size', '10',
-        '-hls_flags', 'delete_segments+discont_start+omit_endlist', 
+        '-hls_flags', 'delete_segments+discont_start+split_by_time', // Ensure clean segment breaks
         '-hls_segment_filename', '/var/www/hls/segment_%03d.ts',
         '/var/www/hls/live.m3u8'
     ];
