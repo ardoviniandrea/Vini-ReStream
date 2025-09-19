@@ -704,8 +704,10 @@ async function startStream(sourceUrl) {
     // Otherwise, FFmpeg starts too fast and gets a 404.
     const needsDelay = isMpdStream || (settings.buffer.enabled && !isRestart && !isMpdStream);
     if (needsDelay) {
-        console.log('[Stream Start] Waiting 1 second for Nginx to see local file...');
-        await new Promise(resolve => setTimeout(resolve, 1000)); // 1-second delay
+        // --- MODIFIED ---
+        console.log('[Stream Start] Waiting 2 seconds for Nginx to see local file...');
+        await new Promise(resolve => setTimeout(resolve, 2000)); // 2-second delay
+        // --- END MODIFICATION ---
         console.log('[Stream Start] Delay complete. Starting FFmpeg.');
     }
     // --- *** END OF FIX *** ---
@@ -1018,4 +1020,3 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
-
