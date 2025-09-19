@@ -698,19 +698,17 @@ async function startStream(sourceUrl) {
         console.log('[Stream Start] Using Direct Stream mode (Buffer disabled or unsupported stream type).');
     }
 
-    // --- *** NEW: RACE CONDITION FIX *** ---
-    // We must wait ~1 second *after* saving the local manifest/playlist
-    // to give Nginx time to see the file on the filesystem.
-    // Otherwise, FFmpeg starts too fast and gets a 404.
-    const needsDelay = isMpdStream || (settings.buffer.enabled && !isRestart && !isMpdStream);
-    if (needsDelay) {
-        // --- MODIFIED ---
-        console.log('[Stream Start] Waiting 2 seconds for Nginx to see local file...');
+    // --- *** MODIFIED: RACE CONDITION FIX *** ---
+    // We must reload Nginx *after* the local file is created.
+    const needsReload = isMpdStream || (settings.buffer.enabled && !isRestart && !isMpdStream);
+    if (needsReload) {
+        console.log('[Stream Start] Local file created. Reloading Nginx...');
+        reloadNginx(); // Tell Nginx to see the new file
+        console.log('[Stream Start] Waiting 2 seconds for Nginx to reload...');
         await new Promise(resolve => setTimeout(resolve, 2000)); // 2-second delay
-        // --- END MODIFICATION ---
         console.log('[Stream Start] Delay complete. Starting FFmpeg.');
     }
-    // --- *** END OF FIX *** ---
+    // --- *** END OF MODIFICATION *** ---
 
     // --- IDEA 2 LOGIC ---
     const commandWithPlaceholders = activeProfile.command
@@ -901,7 +899,7 @@ app.post('/api/start', isAuthenticated, (req, res) => {
         fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
         fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
         console.log('Cleared HLS log and blocklist for new stream.');
-        reloadNginx();
+        // --- MODIFICATION: Removed reloadNginx() from here ---
     } catch (writeErr) {
         console.error('Failed to clear logs or blocklist:', writeErr);
     }
@@ -1020,3 +1018,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
