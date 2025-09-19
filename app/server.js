@@ -87,13 +87,13 @@ let ffmpegProcess = null;
 let currentStreamUrl = "";
 const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
 const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
-const VIEWER_TIMEOUT_MS = 15 * 1000; // 15 seconds - This fixes the "ghost viewer" UI issue
-
+const VIEWER_TIMEOUT_MS = 15 * 1000; // 15 seconds
 
 // --- Stream Helper Functions ---
 
 // Function to start ffmpeg
 function startStream(streamUrl) {
+    // (This function's content is identical to your original, so it is collapsed for brevity)
     if (ffmpegProcess) {
         console.log('Killing existing ffmpeg process...');
         ffmpegProcess.kill('SIGKILL');
@@ -102,36 +102,13 @@ function startStream(streamUrl) {
 
     console.log(`Starting stream from: ${streamUrl}`);
     
-    // --- MODIFIED: RE-ENCODING ARGS ---
-    // We now re-encode the stream to fix any source errors.
-    // This uses more CPU but creates a much more stable stream for mobile.
-    // We explicitly map stream 0:4 (1080p) and 0:5 (audio) based on your logs.
     const args = [
-        // --- Input Args (same as before) ---
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
         '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         '-i', streamUrl,
-
-        // --- Stream Mapping (from your logs) ---
-        '-map', '0:4', // Selects the 1080p video stream
-        '-map', '0:5', // Selects the 'ita' audio stream
-
-        // --- Video Re-encoding Args (Replaces '-c copy') ---
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast', // Most important: uses the least CPU
-        '-b:v', '5000k',         // Target video bitrate (source is ~5700k)
-        '-maxrate', '5000k',
-        '-bufsize', '10000k',    // 2x maxrate is a good rule of thumb
-        '-pix_fmt', 'yuv420p',   // Maximum compatibility for players
-        '-g', '100',             // Keyframe every 2s (for 50fps source)
-
-        // --- Audio Re-encoding Args (Replaces '-c copy') ---
-        '-c:a', 'aac',
-        '-b:a', '128k',
-
-        // --- HLS Output Args (same as before) ---
+        '-c', 'copy', 
         '-f', 'hls',
         '-hls_time', '4',
         '-hls_list_size', '10',
@@ -139,7 +116,6 @@ function startStream(streamUrl) {
         '-hls_segment_filename', '/var/www/hls/segment_%03d.ts',
         '/var/www/hls/live.m3u8'
     ];
-    // --- END OF MODIFIED ARGS ---
 
     ffmpegProcess = spawn('ffmpeg', args);
     currentStreamUrl = streamUrl;
@@ -154,112 +130,22 @@ function startStream(streamUrl) {
 
     ffmpegProcess.on('close', (code) => {
         console.log(`ffmpeg process exited with code ${code}`);
-        // If process stops for any reason, make sure we clean up
-        stopStreamProcess('ffmpeg_close');
+        if (ffmpegProcess) {
+            ffmpegProcess = null;
+            currentStreamUrl = "";
+        }
     });
 
     ffmpegProcess.on('error', (err) => {
         console.error('Failed to start ffmpeg process:', err);
-        stopStreamProcess('ffmpeg_error');
-    });
-}
-
-// --- NEW: Extracted function to stop the stream ---
-// This can be called by the API or if ffmpeg crashes
-function stopStreamProcess(source = 'api') {
-    console.log(`Stopping stream process (triggered by: ${source})`);
-
-    // Stop ffmpeg
-    if (ffmpegProcess) {
-        ffmpegProcess.kill('SIGKILL');
         ffmpegProcess = null;
         currentStreamUrl = "";
-    }
-
-    // Clear logs and blocklist
-    try {
-        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
-        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
-        console.log('Cleared HLS log and blocklist on stream stop.');
-        reloadNginx(); // Reload nginx to apply empty blocklist
-    } catch (writeErr) {
-        console.error('Failed to clear logs or blocklist:', writeErr);
-    }
-}
-
-// --- NEW: Extracted function to check viewers ---
-// Returns a promise that resolves with the list of active viewers
-function checkActiveViewers() {
-    return new Promise((resolve, reject) => {
-        if (!ffmpegProcess) {
-            return resolve([]); // No stream running, no viewers
-        }
-
-        let blockedIps = new Set();
-        try {
-            const blocklistData = fs.readFileSync(BLOCKLIST_PATH, 'utf8');
-            const blocklistLines = blocklistData.split('\n');
-            for (const line of blocklistLines) {
-                if (line.startsWith('deny ')) {
-                    blockedIps.add(line.substring(5, line.length - 1));
-                }
-            }
-        } catch (readErr) {
-            console.warn('Failed to read blocklist, continuing without it.', readErr);
-            // Don't reject, just proceed without blocklist
-        }
-
-        fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
-            if (err) {
-                console.error('Failed to read HLS log:', err);
-                return reject(new Error('Failed to read viewer log'));
-            }
-
-            const lines = data.split('\n').filter(line => line.trim() !== '');
-            const viewers = new Map();
-            const now = Date.now();
-            const logRegex = /([\d\.:a-f]+) - \[([^\]]+)\]/;
-
-            for (const line of lines) {
-                const match = line.match(logRegex);
-                if (!match) continue;
-
-                const ip = match[1];
-                const timestampStr = match[2].replace('/', ' ').replace('/', ' ').replace(':', ' ');
-                const timestamp = Date.parse(timestampStr);
-
-                if (isNaN(timestamp)) {
-                    console.warn(`Could not parse timestamp: ${match[2]}`);
-                    continue;
-                }
-
-                const viewer = viewers.get(ip) || { 
-                    ip, 
-                    firstSeen: timestamp, 
-                    lastSeen: timestamp,
-                    isBlocked: blockedIps.has(ip)
-                };
-
-                if (timestamp > viewer.lastSeen) viewer.lastSeen = timestamp;
-                if (timestamp < viewer.firstSeen) viewer.firstSeen = timestamp;
-                viewer.isBlocked = blockedIps.has(ip); 
-                viewers.set(ip, viewer);
-            }
-
-            // This line is the "ghost" fix. It filters out anyone who hasn't been seen in 15s.
-            const activeViewers = Array.from(viewers.values()).filter(v => 
-                (now - v.lastSeen) < VIEWER_TIMEOUT_MS
-            );
-            resolve(activeViewers);
-        });
     });
 }
-
-// --- REMOVED: Watchdog functions ---
-// (startStreamWatchdog and streamWatchdog functions have been removed)
 
 // Function to reload nginx config
 function reloadNginx() {
+    // (This function's content is identical to your original)
     exec('supervisorctl -c /etc/supervisor/conf.d/supervisord.conf signal HUP nginx', (err, stdout, stderr) => {
         if (err) {
             console.error('Failed to reload nginx:', stderr);
@@ -271,9 +157,8 @@ function reloadNginx() {
 
 
 // --- NEW: Auth API Endpoints ---
-// (These are unchanged)
-// ...
-// Check auth status
+
+// Check auth status and if any users exist (for first-run)
 app.get('/api/auth/check', (req, res) => {
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
         if (err) {
@@ -300,6 +185,8 @@ app.get('/api/auth/check', (req, res) => {
 });
 
 // Register a user
+// 1. If NO users exist, anyone can register (first-run setup).
+// 2. If users *do* exist, only an authenticated user can register (admin-only).
 app.post('/api/auth/register', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password || password.length < 4) {
@@ -402,8 +289,7 @@ app.post('/api/auth/logout', (req, res) => {
 
 
 // --- NEW: User Management API Endpoints (Protected) ---
-// (These are unchanged)
-// ...
+
 // Get all users (omit passwords)
 app.get('/api/users', isAuthenticated, (req, res) => {
     db.all("SELECT id, username FROM users ORDER BY username", (err, rows) => {
@@ -447,7 +333,7 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
 });
 
 
-// --- Stream API Endpoints (NOW PROTECTED & MODIFIED) ---
+// --- Stream API Endpoints (NOW PROTECTED) ---
 
 app.post('/api/start', isAuthenticated, (req, res) => {
     const { url } = req.body;
@@ -455,16 +341,14 @@ app.post('/api/start', isAuthenticated, (req, res) => {
         return res.status(400).json({ error: 'Missing "url" in request body' });
     }
 
-    // --- MODIFIED: Clear logs on start ---
+    // Clear old logs and blocklist when a new stream starts
     try {
-        // Clear old logs and blocklist when a new stream starts
         fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
         fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
         console.log('Cleared HLS log and blocklist for new stream.');
         reloadNginx(); // Reload nginx to apply empty blocklist
     } catch (writeErr) {
         console.error('Failed to clear logs or blocklist:', writeErr);
-        // Don't stop, just log the error
     }
 
     try {
@@ -476,9 +360,22 @@ app.post('/api/start', isAuthenticated, (req, res) => {
 });
 
 app.post('/api/stop', isAuthenticated, (req, res) => {
-    // --- MODIFIED: Use new stop function ---
     if (ffmpegProcess) {
-        stopStreamProcess('api');
+        console.log('Stopping stream via API request...');
+        ffmpegProcess.kill('SIGKILL');
+        ffmpegProcess = null;
+        currentStreamUrl = "";
+
+        // Clear logs and blocklist on stop
+        try {
+            fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
+            fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
+            console.log('Cleared HLS log and blocklist on stream stop.');
+            reloadNginx(); // Reload nginx to apply empty blocklist
+        } catch (writeErr) {
+            console.error('Failed to clear logs or blocklist:', writeErr);
+        }
+        
         res.json({ message: 'Stream stopped' });
     } else {
         res.json({ message: 'Stream not running' });
@@ -486,26 +383,89 @@ app.post('/api/stop', isAuthenticated, (req, res) => {
 });
 
 app.get('/api/status', isAuthenticated, (req, res) => {
+    // Report if the process is running and what URL it's using
     res.json({ 
         running: (ffmpegProcess !== null),
         url: currentStreamUrl 
     });
 });
 
-app.get('/api/viewers', isAuthenticated, async (req, res) => {
-    // --- MODIFIED: Use new viewer function ---
-    try {
-        const activeViewers = await checkActiveViewers();
-        activeViewers.sort((a, b) => b.lastSeen - a.lastSeen);
-        res.json(activeViewers);
-    } catch (error) {
-        console.error('Failed to get viewers for API:', error);
-        res.status(500).json({ error: error.message || 'Failed to read viewer log' });
+app.get('/api/viewers', isAuthenticated, (req, res) => {
+    // (This function's content is identical to your original, so it is collapsed for brevity)
+    if (!ffmpegProcess) {
+        return res.json([]); // No stream running, no viewers
     }
+
+    // First, read the blocklist
+    let blockedIps = new Set();
+    try {
+        const blocklistData = fs.readFileSync(BLOCKLIST_PATH, 'utf8');
+        const blocklistLines = blocklistData.split('\n');
+        for (const line of blocklistLines) {
+            if (line.startsWith('deny ')) {
+                blockedIps.add(line.substring(5, line.length - 1)); // 'deny 1.2.3.4;' -> '1.2.3.4'
+            }
+        }
+    } catch (readErr) {
+        console.error('Failed to read blocklist, continuing without it.', readErr);
+    }
+
+    // Now, read the access log
+    fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
+        if (err) {
+            console.error('Failed to read HLS log:', err);
+            return res.status(500).json({ error: 'Failed to read viewer log' });
+        }
+
+        const lines = data.split('\n').filter(line => line.trim() !== '');
+        const viewers = new Map();
+        const now = Date.now();
+
+        // Nginx log format: 1.2.3.4 - [18/Sep/2025:15:41:00 +0200]
+        const logRegex = /([\d\.:a-f]+) - \[([^\]]+)\]/; // Support IPv4 and IPv6
+
+        for (const line of lines) {
+            const match = line.match(logRegex);
+            if (!match) continue;
+
+            const ip = match[1];
+            const timestampStr = match[2].replace('/', ' ').replace('/', ' ').replace(':', ' ');
+            const timestamp = Date.parse(timestampStr);
+
+            if (isNaN(timestamp)) {
+                console.warn(`Could not parse timestamp: ${match[2]}`);
+                continue;
+            }
+
+            const viewer = viewers.get(ip) || { 
+                ip, 
+                firstSeen: timestamp, 
+                lastSeen: timestamp,
+                isBlocked: blockedIps.has(ip)
+            };
+
+            if (timestamp > viewer.lastSeen) {
+                viewer.lastSeen = timestamp;
+            }
+            if (timestamp < viewer.firstSeen) {
+                viewer.firstSeen = timestamp;
+            }
+            viewer.isBlocked = blockedIps.has(ip); 
+            viewers.set(ip, viewer);
+        }
+
+        const activeViewers = Array.from(viewers.values()).filter(v => 
+            (now - v.lastSeen) < VIEWER_TIMEOUT_MS
+        );
+
+        activeViewers.sort((a, b) => b.lastSeen - a.lastSeen);
+
+        res.json(activeViewers);
+    });
 });
 
 app.post('/api/terminate', isAuthenticated, (req, res) => {
-    // (This function's content is identical to your original)
+    // (This function's content is identical to your original, so it is collapsed for brevity)
     const { ip } = req.body;
     if (!ip) {
         return res.status(400).json({ error: 'Missing "ip" in request body' });
@@ -537,6 +497,7 @@ app.post('/api/terminate', isAuthenticated, (req, res) => {
 
 
 // Serve the index.html for the root route (handled by express.static)
+// The original file had this, so we keep it as a fallback.
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -545,4 +506,3 @@ app.listen(port, '127.0.0.1', () => {
     // Listens on localhost only, Nginx will handle public traffic
     console.log(`Stream control API listening on port ${port}`);
 });
-
