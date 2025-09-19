@@ -102,8 +102,7 @@ function startStream(streamUrl) {
 
     console.log(`Starting stream from: ${streamUrl}`);
     
-    // --- MODIFIED FFMPEG COMMAND ---
-    // This command now re-encodes for maximum compatibility and low CPU.
+    // --- MODIFIED FFMPEG COMMAND (Quality & Compatibility Fix) ---
     const args = [
         // --- Input Flags (Robustness) ---
         '-reconnect', '1',
@@ -115,17 +114,22 @@ function startStream(streamUrl) {
         
         // --- Input Source ---
         '-i', streamUrl,
+
+        // --- NEW: Stream Selection (from logs) ---
+        // 0:3 was the 1280x720 (720p) video stream
+        // 0:5 was the AAC audio stream
+        '-map', '0:3', // Selects 720p video
+        '-map', '0:5', // Selects AAC audio
         
-        // --- Video Re-encoding (The Fix) ---
+        // --- Video Re-encoding (CPU/Compatibility Fix) ---
         '-c:v', 'libx264',       // Re-encode video using x264
-        '-preset', 'ultrafast',  // <--- KEY: Use lowest CPU preset
+        '-preset', 'veryfast',   // <--- KEY: More stable than ultrafast, good balance
+        '-r', '25',              // <--- KEY: Force 25fps (from 50fps) for massive CPU save
         '-tune', 'zerolatency',  // Optimize for live streaming
         '-pix_fmt', 'yuv420p',   // Standard pixel format for compatibility
         
-        // --- Audio Re-encoding (The Fix) ---
-        '-c:a', 'aac',           // Re-encode audio to AAC
-        '-b:a', '128k',          // Standard audio bitrate
-        '-ar', '44100',          // Standard audio sample rate (common for HLS)
+        // --- Audio (CPU Fix) ---
+        '-c:a', 'copy',          // <--- KEY: Copy audio directly, don't re-encode
         
         // --- HLS Output ---
         '-f', 'hls',
@@ -300,7 +304,7 @@ app.post('/api/auth/login', (req, res) => {
 app.post('/api/auth/logout', (req, res) => {
     req.session.destroy((err) => {
         if (err) {
-            return res.status(500).json({ error: 'Failed to log out' });
+            return res.status(5m0).json({ error: 'Failed to log out' });
         }
         res.clearCookie('connect.sid'); // Clear the session cookie
         res.json({ message: 'Logout successful' });
@@ -526,3 +530,4 @@ app.listen(port, '127.0.0.1', () => {
     // Listens on localhost only, Nginx will handle public traffic
     console.log(`Stream control API listening on port ${port}`);
 });
+
