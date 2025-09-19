@@ -1,20 +1,42 @@
+# Use version 3.8 to support the 'deploy.resources' key for GPU access
+version: "3.8"
+
 services:
   vini-restream:
     container_name: vini-restream
-    image: ghcr.io/ardoviniandrea/vini-restream:latest
+    # Build from the Dockerfile in the current directory instead of pulling an image
+    build: .
     ports:
       # 8995 for the UI (proxied by Nginx)
       - "8995:8995"
       # 8994 for the HLS Stream (served by Nginx)
       - "8994:8994"
     restart: unless-stopped
-    # --- NEW: Add persistent volume mount ---
-    # Mounts the 'restream-data' volume to the '/data' directory in the container.
-    # This is where we will store the SQLite database.
     volumes:
+      # This volume persists the SQLite database and our new settings file
       - restream-data:/data
+    
+    # Load environment variables (for SESSION_SECRET) from a .env file
+    # We will update server.js to use this.
+    env_file:
+      - .env
 
-# --- NEW: Define the named volume ---
-# This tells Docker to manage a persistent volume named 'restream-data'.
+    # --- GPU HARDWARE ACCELERATION (from T104 reference) ---
+    # This passes the host's NVIDIA GPU into the container.
+    # Requires the NVIDIA Container Toolkit on your host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # --- For Intel Quick Sync Video (QSV) ---
+    # If you were on Intel, you would uncomment this line instead:
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+# Define the named volume for persistent data
 volumes:
   restream-data:
