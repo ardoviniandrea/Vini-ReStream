@@ -13,17 +13,26 @@
             height: 100%;
             font-family: 'Inter', sans-serif, system-ui;
         }
-        /* Custom styles for the modal */
-        #confirmation-modal {
+        /* Custom styles for modals */
+        .modal-backdrop {
             transition: opacity 0.2s ease-in-out;
         }
-        #confirmation-modal.hidden {
+        .modal-backdrop.hidden {
             opacity: 0;
             pointer-events: none;
         }
-        #confirmation-modal.visible {
+        .modal-backdrop.visible {
             opacity: 1;
             pointer-events: auto;
+        }
+        .modal-content {
+            transition: all 0.2s ease-in-out;
+            transform: scale(0.95);
+            opacity: 0;
+        }
+        .modal-backdrop.visible .modal-content {
+            transform: scale(1);
+            opacity: 1;
         }
         /* Style for tables */
         .data-table th, .data-table td {
@@ -43,7 +52,7 @@
             border-bottom: none;
         }
 
-        /* --- NEW: Tab Styles --- */
+        /* --- Tab Styles --- */
         .tab-btn {
             padding: 0.5rem 1rem;
             border-radius: 0.5rem;
@@ -71,13 +80,27 @@
             display: block; /* Shown when active */
         }
 
+        /* Custom Switch */
+        .switch { position: relative; display: inline-block; width: 38px; height: 22px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #4b5563; transition: .4s; border-radius: 22px; }
+        .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #4f46e5; }
+        input:focus + .slider { box-shadow: 0 0 1px #4f46e5; }
+        input:checked + .slider:before { transform: translateX(16px); }
+
+        /* Disable buttons for default profiles */
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
 
     <!-- 
       ================================================================
-      --- NEW: AUTH CONTAINER (LOGIN / REGISTER) ---
+      --- AUTH CONTAINER (LOGIN / REGISTER) ---
       Visible by default, hidden after login
       ================================================================
     -->
@@ -120,11 +143,11 @@
 
     <!-- 
       ================================================================
-      --- NEW: APP CONTAINER (STREAM + USER MGMT) ---
+      --- APP CONTAINER (STREAM + USER MGMT + SETTINGS) ---
       Hidden by default, visible after login
       ================================================================
     -->
-    <div id="app-container" class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-3xl" style="display: none;">
+    <div id="app-container" class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-4xl" style="display: none;">
         
         <!-- App Header -->
         <div class="flex items-center justify-between mb-6 space-x-3">
@@ -132,22 +155,23 @@
                 <img src="https://i.imgur.com/qqjoPdW.png" alt="Vini ReStream Logo" class="h-10 w-10 rounded-lg shadow-md" onerror="this.style.display='none'">
                 <h1 class="text-3xl font-bold text-indigo-400">Vini ReStream</h1>
             </div>
-            <!-- NEW: Welcome & Logout -->
+            <!-- Welcome & Logout -->
             <div class="text-right">
                 <span class="text-sm text-gray-400 block">Welcome, <strong id="welcome-username" class="text-gray-200">User</strong></span>
                 <button id="logout-btn" class="text-sm text-indigo-400 hover:text-indigo-300 hover:underline focus:outline-none">Logout</button>
             </div>
         </div>
 
-        <!-- NEW: Tab Navigation -->
+        <!-- Tab Navigation -->
         <div class="flex space-x-2 mb-6 border-b border-gray-700 pb-3">
             <button id="tab-stream" class="tab-btn active" data-tab="stream-panel">Stream Control</button>
             <button id="tab-users" class="tab-btn inactive" data-tab="users-panel">User Management</button>
+            <button id="tab-settings" class="tab-btn inactive" data-tab="settings-panel">Settings</button>
         </div>
 
         <!-- 
           ---------------------------------
-          --- TAB 1: STREAM CONTROL (Original UI) ---
+          --- TAB 1: STREAM CONTROL ---
           ---------------------------------
         -->
         <div id="stream-panel" class="tab-panel active">
@@ -159,8 +183,8 @@
 
             <!-- URL Input -->
             <div class="mb-4">
-                <label for="stream-url" class="block text-sm font-medium text-gray-300 mb-2">Authenticated Stream Link (40s expiry)</label>
-                <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your .m3u8 or .mpd link here...">
+                <label for="stream-url" class="block text-sm font-medium text-gray-300 mb-2">Authenticated Stream Link</label>
+                <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your .m3u8 link here...">
             </div>
 
             <!-- Action Buttons -->
@@ -250,16 +274,71 @@
             </div>
         </div> <!-- End Users Panel -->
 
+        <!-- 
+          ---------------------------------
+          --- TAB 3: SETTINGS (NEW) ---
+          ---------------------------------
+        -->
+        <div id="settings-panel" class="tab-panel space-y-6">
+            
+            <!-- Idea 1: Pre-fetch Buffer Settings -->
+            <div class="bg-gray-900 p-6 rounded-lg border border-gray-700">
+                <h3 class="text-xl font-bold text-indigo-300 mb-2">Pre-fetch Buffer (Idea 1)</h3>
+                <p class="text-sm text-gray-400 mb-4">Enable this to download stream segments in advance. This creates a delay but massively improves stability on flaky source streams and prevents skips on mobile.</p>
+                <div class="space-y-4">
+                    <div class="flex items-center justify-between">
+                        <label for="buffer-enabled" class="font-medium text-gray-200">Enable Pre-fetch Buffer</label>
+                        <label class="switch">
+                            <input type="checkbox" id="buffer-enabled">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <label for="buffer-delay" class="font-medium text-gray-200">Buffer Delay (seconds)</label>
+                        <input type="number" id="buffer-delay" value="30" min="5" max="300" class="w-24 p-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Idea 2: FFmpeg Profile Manager -->
+            <div class="bg-gray-900 p-6 rounded-lg border border-gray-700">
+                <h3 class="text-xl font-bold text-indigo-300 mb-2">FFmpeg Profile Manager (Idea 2)</h3>
+                <p class="text-sm text-gray-400 mb-4">Select the FFmpeg command to use for transcoding. Add custom profiles to use hardware acceleration (e.g., NVIDIA NVENC).</p>
+                
+                <div class="mb-4">
+                    <label for="active-profile-select" class="block text-sm font-medium text-gray-300 mb-2">Active Stream Profile</label>
+                    <select id="active-profile-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"></select>
+                </div>
+                
+                <div class="flex space-x-3">
+                    <button id="add-profile-btn" class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition">New Profile</button>
+                    <button id="edit-profile-btn" class="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition">Edit Selected</button>
+                    <button id="delete-profile-btn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition">Delete Selected</button>
+                </div>
+            </div>
+
+            <!-- Save Button for all settings -->
+            <div class="mt-6 flex justify-end">
+                 <button id="save-settings-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300 shadow-lg hover:shadow-indigo-500/50">
+                    Save All Settings
+                </button>
+            </div>
+            <div id="settings-message-log" class="text-center text-gray-400 mt-4 text-sm h-5"></div>
+        </div><!-- End Settings Panel -->
+
+
     </div> <!-- End App Container -->
 
 
     <!-- 
       ================================================================
-      --- MODALS (Confirmation) ---
+      --- MODALS ---
       ================================================================
     -->
-    <div id="confirmation-modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 hidden">
-        <div class="bg-gray-800 rounded-lg shadow-2xl p-6 w-full max-w-sm">
+    
+    <!-- Confirmation Modal (Generic) -->
+    <div id="confirmation-modal" class="modal-backdrop fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 hidden z-50">
+        <div class="modal-content bg-gray-800 rounded-lg shadow-2xl p-6 w-full max-w-sm">
             <h3 id="modal-title" class="text-xl font-bold mb-4">Confirm Action</h3>
             <p class="text-gray-300 mb-6" id="modal-message">Are you sure?</p>
             <div class="flex justify-end space-x-3">
@@ -269,22 +348,63 @@
         </div>
     </div>
 
+    <!-- NEW: Profile Editor Modal -->
+    <div id="profile-editor-modal" class="modal-backdrop hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50">
+        <div class="modal-content bg-gray-800 rounded-lg shadow-2xl w-full max-w-2xl">
+            <form id="profile-editor-form">
+                <div class="p-6">
+                    <h3 id="profile-modal-title" class="text-xl font-bold text-white mb-4"></h3>
+                    <input type="hidden" id="profile-id">
+                    <input type="hidden" id="profile-is-default" value="false">
+                    
+                    <div class="space-y-4">
+                        <div>
+                            <label for="profile-name" class="block text-sm font-medium text-gray-400">Profile Name</label>
+                            <input type="text" id="profile-name" class="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500" required>
+                        </div>
+                        <div>
+                            <label for="profile-command" class="block text-sm font-medium text-gray-400">FFmpeg Command</label>
+                            <textarea id="profile-command" rows="6" class="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white font-mono text-sm focus:ring-blue-500 focus:border-blue-500" required></textarea>
+                            <p class="text-xs text-gray-500 mt-2">
+                                Use placeholders:
+                                <code class="bg-gray-900 text-indigo-300 px-1 py-0.5 rounded">{streamUrl}</code>
+                                <code class="bg-gray-900 text-indigo-300 px-1 py-0.5 rounded">{userAgent}</code>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4 rounded-b-lg">
+                    <button type="button" id="modal-cancel-profile-btn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md">Cancel</button>
+                    <button type="submit" id="modal-save-profile-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Save Profile</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
 
     <script>
         // API URL
         const apiUrl = '/api'; 
 
-        // --- NEW: Global State ---
+        // --- Global State ---
         let viewerCheckInterval = null;
         let authState = {
             isLoggedIn: false,
             hasUsers: false,
             username: ''
         };
-        // This will hold the action to confirm (e.g., terminate IP, delete user)
         let pendingConfirmAction = null; 
+        // NEW: Global settings cache
+        let globalSettings = {
+            buffer: {
+                enabled: false,
+                delaySeconds: 30
+            },
+            profiles: [],
+            activeProfileId: null
+        };
 
-        // --- NEW: Auth UI Elements ---
+        // --- Auth UI Elements ---
         const authContainer = document.getElementById('auth-container');
         const authForm = document.getElementById('auth-form');
         const authTitle = document.getElementById('auth-title');
@@ -295,16 +415,18 @@
         const authPasswordInput = document.getElementById('password');
         const authMessageLog = document.getElementById('auth-message-log');
 
-        // --- NEW: App UI Elements ---
+        // --- App UI Elements ---
         const appContainer = document.getElementById('app-container');
         const welcomeUsername = document.getElementById('welcome-username');
         const logoutBtn = document.getElementById('logout-btn');
 
-        // --- NEW: Tab UI Elements ---
+        // --- Tab UI Elements ---
         const tabStream = document.getElementById('tab-stream');
         const tabUsers = document.getElementById('tab-users');
+        const tabSettings = document.getElementById('tab-settings');
         const streamPanel = document.getElementById('stream-panel');
         const usersPanel = document.getElementById('users-panel');
+        const settingsPanel = document.getElementById('settings-panel');
 
         // --- Stream Control UI Elements ---
         const streamUrlInput = document.getElementById('stream-url');
@@ -325,7 +447,7 @@
         const viewerTableBody = document.getElementById('viewer-table-body');
         const noViewersRow = document.getElementById('no-viewers-row');
         
-        // --- NEW: User Management UI Elements ---
+        // --- User Management UI Elements ---
         const addUserForm = document.getElementById('add-user-form');
         const newUsernameInput = document.getElementById('new-username');
         const newPasswordInput = document.getElementById('new-password');
@@ -333,19 +455,42 @@
         const noUsersRow = document.getElementById('no-users-row');
         const userMessageLog = document.getElementById('user-message-log');
 
-        // --- Modal UI Elements ---
+        // --- Generic Modal UI Elements ---
         const modal = document.getElementById('confirmation-modal');
         const modalTitle = document.getElementById('modal-title');
         const modalMessage = document.getElementById('modal-message');
         const modalCancelBtn = document.getElementById('modal-cancel-btn');
         const modalConfirmBtn = document.getElementById('modal-confirm-btn');
 
+        // --- NEW: Settings Panel UI Elements ---
+        const saveSettingsBtn = document.getElementById('save-settings-btn');
+        const settingsMessageLog = document.getElementById('settings-message-log');
+        // Buffer
+        const bufferEnabledInput = document.getElementById('buffer-enabled');
+        const bufferDelayInput = document.getElementById('buffer-delay');
+        // Profiles
+        const activeProfileSelect = document.getElementById('active-profile-select');
+        const addProfileBtn = document.getElementById('add-profile-btn');
+        const editProfileBtn = document.getElementById('edit-profile-btn');
+        const deleteProfileBtn = document.getElementById('delete-profile-btn');
+
+        // --- NEW: Profile Editor Modal UI Elements ---
+        const profileEditorModal = document.getElementById('profile-editor-modal');
+        const profileEditorForm = document.getElementById('profile-editor-form');
+        const profileModalTitle = document.getElementById('profile-modal-title');
+        const profileIdInput = document.getElementById('profile-id');
+        const profileIsDefaultInput = document.getElementById('profile-is-default');
+        const profileNameInput = document.getElementById('profile-name');
+        const profileCommandInput = document.getElementById('profile-command');
+        const modalSaveProfileBtn = document.getElementById('modal-save-profile-btn');
+        const modalCancelProfileBtn = document.getElementById('modal-cancel-profile-btn');
+
 
         // Set public stream URL
         const publicStreamUrl = `http://${window.location.hostname}:8994/live.m3u8`;
         shareLink.value = publicStreamUrl;
 
-        // --- NEW: General Message Loggers ---
+        // --- General Message Loggers ---
         function logAuthMessage(message, isError = true) {
             authMessageLog.textContent = message;
             authMessageLog.className = isError 
@@ -370,7 +515,15 @@
             setTimeout(() => { userMessageLog.textContent = ''; }, 4000);
         }
 
-        // --- NEW: UI State Management ---
+        function logSettingsMessage(message, isError = false) {
+            settingsMessageLog.textContent = message;
+            settingsMessageLog.className = isError 
+                ? 'text-center text-red-400 mt-4 text-sm h-5' 
+                : 'text-center text-green-400 mt-4 text-sm h-5';
+            setTimeout(() => { settingsMessageLog.textContent = ''; }, 4000);
+        }
+
+        // --- UI State Management ---
         function showLoginPanel(hasUsers) {
             if (hasUsers) {
                 // Normal login
@@ -402,30 +555,33 @@
         }
 
         function showTab(tabId) {
-            if (tabId === 'stream-panel') {
-                // Show stream panel
-                streamPanel.classList.add('active');
-                usersPanel.classList.remove('active');
-                // Update tab buttons
-                tabStream.classList.add('active');
-                tabStream.classList.remove('inactive');
-                tabUsers.classList.add('inactive');
-                tabUsers.classList.remove('active');
-            } else if (tabId === 'users-panel') {
-                // Show users panel
-                streamPanel.classList.remove('active');
-                usersPanel.classList.add('active');
-                // Update tab buttons
-                tabStream.classList.add('inactive');
-                tabStream.classList.remove('active');
-                tabUsers.classList.add('active');
-                tabUsers.classList.remove('inactive');
-                // Fetch users every time tab is clicked
+            const tabs = [tabStream, tabUsers, tabSettings];
+            const panels = [streamPanel, usersPanel, settingsPanel];
+
+            panels.forEach(panel => panel.classList.remove('active'));
+            tabs.forEach(tab => {
+                tab.classList.remove('active');
+                tab.classList.add('inactive');
+            });
+
+            const activePanel = document.getElementById(tabId);
+            const activeTab = document.querySelector(`[data-tab="${tabId}"]`);
+            
+            if (activePanel) activePanel.classList.add('active');
+            if (activeTab) {
+                activeTab.classList.add('active');
+                activeTab.classList.remove('inactive');
+            }
+
+            // Load data when switching to a data-heavy tab
+            if (tabId === 'users-panel') {
                 fetchUsers();
+            } else if (tabId === 'settings-panel') {
+                loadSettingsAndProfiles();
             }
         }
 
-        // --- NEW: Auth API Functions ---
+        // --- Auth API Functions ---
 
         async function checkAuthStatus() {
             try {
@@ -462,11 +618,9 @@
             let action;
 
             if (authState.hasUsers) {
-                // This is a LOGIN attempt
                 url = `${apiUrl}/auth/login`;
                 action = 'Logging in...';
             } else {
-                // This is a REGISTER attempt
                 if (password.length < 4) {
                     logAuthMessage('Password must be at least 4 characters long.');
                     return;
@@ -486,17 +640,14 @@
 
                 const data = await response.json();
                 if (response.ok) {
-                    // Success! Re-check auth status which will update the UI
                     await checkAuthStatus();
                 } else {
-                    // Show error from server
                     logAuthMessage(data.error || 'An unknown error occurred.');
                 }
             } catch (error) {
                 console.error('Auth error:', error);
                 logAuthMessage('Failed to authenticate.');
             } finally {
-                // Reset button text
                 authBtn.textContent = authState.hasUsers ? 'Login' : 'Register';
                 authBtn.disabled = false;
             }
@@ -508,34 +659,20 @@
             } catch (error) {
                 console.error('Logout error:', error);
             } finally {
-                // Always log out on client side, even if server fails
                 authState.isLoggedIn = false;
-                // Stop checking viewers
                 stopViewerCheck();
-                // Check auth status again (will show login panel)
                 await checkAuthStatus();
-                // Clear inputs
                 authUsernameInput.value = '';
                 authPasswordInput.value = '';
             }
         }
 
 
-        // --- NEW: User Management API Functions ---
+        // --- User Management API Functions ---
 
         async function fetchUsers() {
             try {
-                const response = await fetch(`${apiUrl}/users`);
-                if (!response.ok) {
-                    const data = await response.json();
-                    // Handle session expiry
-                    if (response.status === 401) {
-                        logAuthMessage(data.error || 'Session expired. Please log in.');
-                        await handleLogout();
-                        return;
-                    }
-                    throw new Error(data.error || 'Failed to fetch users');
-                }
+                const response = await fetchWithAuth(`${apiUrl}/users`);
                 const users = await response.json();
                 
                 userTableBody.innerHTML = ''; // Clear table
@@ -580,8 +717,7 @@
             }
 
             try {
-                // Register endpoint is re-used. Since we are logged in, it's an admin action.
-                const response = await fetch(`${apiUrl}/auth/register`, {
+                const response = await fetchWithAuth(`${apiUrl}/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, password })
@@ -594,23 +730,17 @@
                     newPasswordInput.value = '';
                     await fetchUsers(); // Refresh list
                 } else {
-                    // Handle session expiry
-                    if (response.status === 401) {
-                        logAuthMessage(data.error || 'Session expired. Please log in.');
-                        await handleLogout();
-                        return;
-                    }
                     logUserMessage(data.error || 'Failed to create user', true);
                 }
             } catch (error) {
                 console.error('Error adding user:', error);
-                logUserMessage('Error adding user', true);
+                logUserMessage(error.message, true);
             }
         }
 
         async function handleDeleteUser(userId, username) {
             try {
-                const response = await fetch(`${apiUrl}/users/${userId}`, {
+                const response = await fetchWithAuth(`${apiUrl}/users/${userId}`, {
                     method: 'DELETE'
                 });
                 const data = await response.json();
@@ -618,22 +748,16 @@
                     logUserMessage(`User '${username}' deleted.`, false);
                     await fetchUsers(); // Refresh list
                 } else {
-                    // Handle session expiry
-                    if (response.status === 401) {
-                        logAuthMessage(data.error || 'Session expired. Please log in.');
-                        await handleLogout();
-                        return;
-                    }
                     logUserMessage(data.error || 'Failed to delete user', true);
                 }
             } catch (error) {
                 console.error('Error deleting user:', error);
-                logUserMessage('Error deleting user', true);
+                logUserMessage(error.message, true);
             }
         }
 
 
-        // --- Stream Control API Functions (Originals, now using logStreamMessage) ---
+        // --- Stream Control API Functions ---
 
         function updateStatus(running, url = "") {
             if (running) {
@@ -667,23 +791,14 @@
         }
 
         async function checkStatus() {
-            if (!authState.isLoggedIn) return; // Don't check if not logged in
+            if (!authState.isLoggedIn) return; 
             try {
-                const response = await fetch(`${apiUrl}/status`);
-                if (response.status === 401) {
-                    // Session expired!
-                    logAuthMessage('Session expired. Please log in again.');
-                    await handleLogout();
-                    return;
-                }
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
+                const response = await fetchWithAuth(`${apiUrl}/status`);
                 const data = await response.json();
                 updateStatus(data.running, data.url);
             } catch (error) {
                 console.error('Failed to check status:', error);
-                logStreamMessage('Cannot connect to server', true);
+                logStreamMessage(error.message, true);
                 updateStatus(false);
             }
         }
@@ -696,7 +811,7 @@
             }
 
             try {
-                const response = await fetch(`${apiUrl}/start`, {
+                const response = await fetchWithAuth(`${apiUrl}/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ url })
@@ -706,38 +821,28 @@
                     logStreamMessage('Stream started!', false);
                     updateStatus(true, url);
                 } else {
-                    if (response.status === 401) {
-                        logAuthMessage(data.error || 'Session expired. Please log in.');
-                        await handleLogout();
-                        return;
-                    }
                     logStreamMessage(data.error || 'Failed to start stream', true);
                 }
             } catch (error) {
                 console.error('Error starting stream:', error);
-                logStreamMessage('Error starting stream', true);
+                logStreamMessage(error.message, true);
             }
         }
 
         async function handleStopStream() {
             try {
-                const response = await fetch(`${apiUrl}/stop`, { method: 'POST' });
+                const response = await fetchWithAuth(`${apiUrl}/stop`, { method: 'POST' });
                 const data = await response.json();
                 if (response.ok) {
                     logStreamMessage('Stream stopped', false);
                     updateStatus(false);
                     streamUrlInput.value = '';
                 } else {
-                    if (response.status === 401) {
-                        logAuthMessage(data.error || 'Session expired. Please log in.');
-                        await handleLogout();
-                        return;
-                    }
                     logStreamMessage(data.error || 'Failed to stop stream', true);
                 }
             } catch (error) {
                 console.error('Error stopping stream:', error);
-                logStreamMessage('Error stopping stream', true);
+                logStreamMessage(error.message, true);
             }
         }
 
@@ -753,7 +858,7 @@
             }
         }
 
-        // --- Viewer List Functions (Originals) ---
+        // --- Viewer List Functions ---
 
         function formatTimeAgo(timestamp) {
             const now = Date.now();
@@ -773,18 +878,9 @@
         }
 
         async function fetchViewers() {
-            if (!authState.isLoggedIn) return; // Don't fetch if logged out
+            if (!authState.isLoggedIn) return; 
             try {
-                const response = await fetch(`${apiUrl}/viewers`);
-                if (response.status === 401) {
-                    // Session expired!
-                    logAuthMessage('Session expired. Please log in again.');
-                    await handleLogout();
-                    return;
-                }
-                if (!response.ok) {
-                    throw new Error('Failed to fetch viewers');
-                }
+                const response = await fetchWithAuth(`${apiUrl}/viewers`);
                 const viewers = await response.json();
                 viewerCount.textContent = viewers.length;
                 viewerTableBody.innerHTML = '';
@@ -799,7 +895,7 @@
                     row.className = "hover:bg-gray-700 transition-colors duration-150";
                     const isBlocked = viewer.isBlocked;
                     const buttonHtml = isBlocked
-                        ? `<button class="bg-gray-500 text-gray-300 text-xs font-bold py-1 px-2 rounded-md cursor-not-allowed" disabled>Terminated</button>`
+                        ? `<button class="bg-gray-500 text-gray-300 text-xs font-bold py-1 px-2 rounded-md" disabled>Terminated</button>`
                         : `<button class="terminate-btn bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded-md shadow" data-ip="${viewer.ip}">Terminate</button>`;
 
                     row.innerHTML = `
@@ -813,7 +909,7 @@
 
             } catch (error) {
                 console.error('Error fetching viewers:', error);
-                logStreamMessage('Could not update viewer list', true);
+                logStreamMessage(error.message, true);
             }
         }
 
@@ -831,7 +927,7 @@
 
         async function terminateIp(ip) {
              try {
-                const response = await fetch(`${apiUrl}/terminate`, {
+                const response = await fetchWithAuth(`${apiUrl}/terminate`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ip: ip })
@@ -841,33 +937,237 @@
                     logStreamMessage(data.message || `Terminated ${ip}`, false);
                     fetchViewers();
                 } else {
-                    if (response.status === 401) {
-                        logAuthMessage(data.error || 'Session expired. Please log in.');
-                        await handleLogout();
-                        return;
-                    }
                     logStreamMessage(data.message || data.error || 'Failed to terminate', true);
                 }
             } catch (error) {
                 console.error('Error terminating IP:', error);
-                logStreamMessage('Error terminating IP', true);
+                logStreamMessage(error.message, true);
             }
         }
 
-        // --- Modal Functions (NEW: Now generic) ---
-        function showModal({ title, message, onConfirm }) {
-            modalTitle.textContent = title;
-            modalMessage.innerHTML = message; // Use innerHTML for strong tags
-            pendingConfirmAction = onConfirm; // Store the confirm action
-            
-            modal.classList.remove('hidden');
-            modal.classList.add('visible');
+        // --- Modal Functions ---
+        function showModal(modalElement) {
+            modalElement.classList.remove('hidden');
+            modalElement.classList.add('visible');
         }
 
-        function hideModal() {
-            pendingConfirmAction = null;
-            modal.classList.add('hidden');
-            modal.classList.remove('visible');
+        function hideModal(modalElement) {
+            modalElement.classList.add('hidden');
+            modalElement.classList.remove('visible');
+        }
+
+        function showConfirmModal({ title, message, onConfirm }) {
+            modalTitle.textContent = title;
+            modalMessage.innerHTML = message;
+            pendingConfirmAction = onConfirm;
+            showModal(modal);
+        }
+
+        // --- NEW: Settings & Profile Functions ---
+
+        // Fetches ALL settings from the server and caches them
+        async function loadSettingsAndProfiles() {
+            try {
+                const response = await fetchWithAuth(`${apiUrl}/settings`);
+                const data = await response.json();
+                globalSettings = data; // Store in global cache
+
+                // Populate Buffer UI
+                bufferEnabledInput.checked = globalSettings.buffer.enabled;
+                bufferDelayInput.value = globalSettings.buffer.delaySeconds;
+                
+                // Populate Profiles UI
+                populateProfileSelect(globalSettings.profiles, globalSettings.activeProfileId);
+
+            } catch (error) {
+                logSettingsMessage(error.message, true);
+            }
+        }
+
+        // Saves the ENTIRE settings object to the server
+        async function saveAllSettings() {
+            try {
+                // 1. Read buffer settings from UI into global cache
+                globalSettings.buffer.enabled = bufferEnabledInput.checked;
+                globalSettings.buffer.delaySeconds = parseInt(bufferDelayInput.value, 10) || 30;
+
+                // 2. Read active profile ID from dropdown into global cache
+                globalSettings.activeProfileId = activeProfileSelect.value;
+                
+                // 3. (Profile array is already updated in the cache by the editor functions)
+
+                const response = await fetchWithAuth(`${apiUrl}/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(globalSettings)
+                });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    globalSettings = data; // Re-sync with the saved version
+                    populateProfileSelect(globalSettings.profiles, globalSettings.activeProfileId);
+                    logSettingsMessage('Settings saved successfully!', false);
+                } else {
+                    logSettingsMessage(data.error || 'Failed to save settings', true);
+                }
+            } catch (error) {
+                logSettingsMessage(error.message, true);
+            }
+        }
+
+        // Populates the dropdown with profiles
+        function populateProfileSelect(profiles = [], activeId = null) {
+            activeProfileSelect.innerHTML = '';
+            profiles.forEach(profile => {
+                const option = document.createElement('option');
+                option.value = profile.id;
+                option.textContent = profile.name + (profile.isDefault ? ' (Default)' : '');
+                if (profile.id === activeId) {
+                    option.selected = true;
+                }
+                activeProfileSelect.appendChild(option);
+            });
+            updateProfileButtonStates();
+        }
+
+        // Enables/disables edit/delete buttons based on selection
+        function updateProfileButtonStates() {
+            const selectedId = activeProfileSelect.value;
+            const selectedProfile = globalSettings.profiles.find(p => p.id === selectedId);
+            
+            if (!selectedProfile) {
+                editProfileBtn.disabled = true;
+                deleteProfileBtn.disabled = true;
+                return;
+            }
+
+            // You can edit defaults, but you can't delete them
+            editProfileBtn.disabled = false;
+            deleteProfileBtn.disabled = selectedProfile.isDefault === true;
+        }
+
+        // Opens the profile editor modal (for new or existing profiles)
+        function openProfileEditor(profile) {
+            profileEditorForm.reset();
+            if (profile) {
+                // Editing existing profile
+                profileModalTitle.textContent = 'Edit Profile';
+                profileIdInput.value = profile.id;
+                profileIsDefaultInput.value = profile.isDefault || false;
+                profileNameInput.value = profile.name;
+                profileCommandInput.value = profile.command;
+
+                // Default profiles can't be renamed or have their commands edited (protects user)
+                const isDefault = profile.isDefault === true;
+                profileNameInput.disabled = isDefault;
+                profileCommandInput.disabled = isDefault;
+                modalSaveProfileBtn.disabled = isDefault;
+
+                if (isDefault) {
+                    profileNameInput.title = "Default profiles cannot be edited.";
+                    profileCommandInput.title = "Default profiles cannot be edited.";
+                } else {
+                    profileNameInput.title = "";
+                    profileCommandInput.title = "";
+                }
+
+            } else {
+                // Creating new profile
+                profileModalTitle.textContent = 'Add New Profile';
+                profileIdInput.value = `custom-${Date.now()}`; // New unique ID
+                profileIsDefaultInput.value = false;
+                
+                profileNameInput.disabled = false;
+                profileCommandInput.disabled = false;
+                modalSaveProfileBtn.disabled = false;
+            }
+            showModal(profileEditorModal);
+        }
+
+        // Saves the profile from the modal into the globalSettings cache
+        function saveProfileFromModal(e) {
+            e.preventDefault();
+            const profileId = profileIdInput.value;
+            const isDefault = profileIsDefaultInput.value === 'true';
+
+            if (isDefault) {
+                // This shouldn't happen since button is disabled, but as a safeguard
+                hideModal(profileEditorModal);
+                return;
+            }
+
+            const newProfileData = {
+                id: profileId,
+                name: profileNameInput.value,
+                command: profileCommandInput.value,
+                isDefault: false
+            };
+
+            // Find if this profile already exists to update it, or add if new
+            const existingIndex = globalSettings.profiles.findIndex(p => p.id === profileId);
+            if (existingIndex > -1) {
+                // Update existing
+                globalSettings.profiles[existingIndex] = newProfileData;
+            } else {
+                // Add new
+                globalSettings.profiles.push(newProfileData);
+            }
+            
+            // Set the new/edited profile as the active one
+            globalSettings.activeProfileId = newProfileData.id;
+
+            // Now, save the *entire* settings object (which includes the updated profiles array) to server
+            saveAllSettings(); // This function also re-populates the select box
+            hideModal(profileEditorModal);
+        }
+
+        // Deletes the selected profile from the globalSettings cache
+        function deleteSelectedProfile() {
+            const selectedId = activeProfileSelect.value;
+            const selectedProfile = globalSettings.profiles.find(p => p.id === selectedId);
+
+            if (!selectedProfile || selectedProfile.isDefault) {
+                logSettingsMessage('Cannot delete a default profile.', true);
+                return;
+            }
+
+            showConfirmModal({
+                title: 'Delete Profile',
+                message: `Are you sure you want to delete profile <strong class="text-red-400">${selectedProfile.name}</strong>?`,
+                onConfirm: () => {
+                    // Filter the profile out of the array
+                    globalSettings.profiles = globalSettings.profiles.filter(p => p.id !== selectedId);
+                    
+                    // Set active profile back to the first default one
+                    globalSettings.activeProfileId = globalSettings.profiles.find(p => p.isDefault).id;
+                    
+                    // Save the entire updated settings object
+                    saveAllSettings(); // This also refreshes the select box
+                }
+            });
+        }
+
+
+        // --- Generic Authed Fetch Wrapper ---
+        // Wraps fetch() and handles 401 Unauthorized errors automatically
+        async function fetchWithAuth(url, options = {}) {
+            const response = await fetch(url, options);
+
+            if (response.status === 401) {
+                // Unauthorized! Session likely expired.
+                logAuthMessage('Session expired. Please log in again.');
+                await handleLogout(); // This will reset the UI to the login screen
+                // Throw an error to stop the original function from continuing
+                throw new Error('Session expired');
+            }
+
+            if (!response.ok) {
+                // Pass other errors (like 400, 404, 500) up the chain
+                const data = await response.json();
+                throw new Error(data.error || `Server error: ${response.status}`);
+            }
+
+            return response; // Return the successful response
         }
         
         // --- Event Listeners ---
@@ -879,6 +1179,7 @@
         // Tabs
         tabStream.addEventListener('click', () => showTab('stream-panel'));
         tabUsers.addEventListener('click', () => showTab('users-panel'));
+        tabSettings.addEventListener('click', () => showTab('settings-panel'));
 
         // Stream Control
         startBtn.addEventListener('click', handleStartStream);
@@ -892,7 +1193,7 @@
                 const id = e.target.getAttribute('data-id');
                 const username = e.target.getAttribute('data-username');
                 if (id && username) {
-                    showModal({
+                    showConfirmModal({
                         title: 'Delete User',
                         message: `Are you sure you want to delete user <strong class="text-red-400">${username}</strong>? This is irreversible.`,
                         onConfirm: () => handleDeleteUser(id, username)
@@ -906,7 +1207,7 @@
             if (e.target && e.target.classList.contains('terminate-btn')) {
                 const ip = e.target.getAttribute('data-ip');
                 if (ip) {
-                    showModal({
+                    showConfirmModal({
                         title: 'Confirm Termination',
                         message: `Are you sure you want to terminate the stream for <strong class="text-red-400">${ip}</strong>? This is irreversible.`,
                         onConfirm: () => terminateIp(ip)
@@ -915,24 +1216,38 @@
             }
         });
 
-        // Modal
-        modalCancelBtn.addEventListener('click', hideModal);
+        // Generic Modal
+        modalCancelBtn.addEventListener('click', () => hideModal(modal));
         modalConfirmBtn.addEventListener('click', () => {
             if (pendingConfirmAction) {
                 pendingConfirmAction();
             }
-            hideModal();
+            hideModal(modal);
         });
 
+        // --- NEW: Settings Panel Listeners ---
+        saveSettingsBtn.addEventListener('click', saveAllSettings);
+        activeProfileSelect.addEventListener('change', updateProfileButtonStates);
+
+        // Profile Editor
+        addProfileBtn.addEventListener('click', () => openProfileEditor(null));
+        editProfileBtn.addEventListener('click', () => {
+            const selectedId = activeProfileSelect.value;
+            const profile = globalSettings.profiles.find(p => p.id === selectedId);
+            if (profile) openProfileEditor(profile);
+        });
+        deleteProfileBtn.addEventListener('click', deleteSelectedProfile);
+        
+        // Profile Modal
+        profileEditorForm.addEventListener('submit', saveProfileFromModal);
+        modalCancelProfileBtn.addEventListener('click', () => hideModal(profileEditorModal));
+
+
         // --- Initial Load ---
-        // On load, set the auth container to display:block so it's visible while checking
         authContainer.style.display = 'block';
-        // Check status on page load
         document.addEventListener('DOMContentLoaded', checkAuthStatus);
         
-        // And check stream status every 10 seconds (if logged in)
         setInterval(checkStatus, 10000);
     </script>
 </body>
 </html>
-
