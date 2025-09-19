@@ -86,18 +86,20 @@ const isAuthenticated = (req, res, next) => {
 
 function getDefaultSettings() {
     return {
+        // --- MODIFIED: Renamed 'active' to 'activeProfileId' to match client
+        activeProfileId: 'default-cpu', 
         profiles: [
             {
                 id: 'default-cpu',
                 name: 'Default (CPU Stream Copy)',
                 command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: true
+                isDefault: true // --- NEW: Flag for default profiles
             },
             {
                 id: 'nvidia-gpu',
                 name: 'NVIDIA (NVENC Re-encode)',
-                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: false
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                isDefault: true // --- NEW: Flag for default profiles
             }
         ],
         buffer: {
@@ -121,10 +123,40 @@ function getSettings() {
     }
     try {
         const settingsData = fs.readFileSync(SETTINGS_PATH, 'utf8');
-        return JSON.parse(settingsData);
+        let settings = JSON.parse(settingsData);
+
+        // --- MIGRATION STEP ---
+        // This handles old settings files that used 'profile.active'
+        if (settings.profiles && !settings.activeProfileId) {
+            console.log('Migrating old settings format...');
+            const oldActive = settings.profiles.find(p => p.active === true);
+            if (oldActive) {
+                settings.activeProfileId = oldActive.id;
+            } else {
+                settings.activeProfileId = 'default-cpu';
+            }
+            // Remove the old 'active' flag
+            settings.profiles.forEach(p => delete p.active);
+            // Add 'isDefault' flag
+            const defaults = getDefaultSettings();
+            settings.profiles.forEach(p => {
+                const defaultProfile = defaults.profiles.find(dp => dp.id === p.id);
+                if (defaultProfile) {
+                    p.isDefault = true;
+                }
+            });
+            // Save the migrated settings
+            saveSettings(settings);
+            console.log('Migration complete.');
+        }
+
+        return settings;
     } catch (e) {
         console.error("Failed to parse settings.json, returning defaults:", e);
-        return getDefaultSettings(); // Return defaults if parsing fails
+        // If file is corrupt, overwrite with defaults
+        const defaults = getDefaultSettings();
+        saveSettings(defaults);
+        return defaults;
     }
 }
 
@@ -141,7 +173,8 @@ function saveSettings(settings) {
 
 function getActiveProfile() {
     const settings = getSettings();
-    return settings.profiles.find(p => p.active === true) || settings.profiles[0];
+    // Find the profile matching the activeProfileId, or fall back to the first profile
+    return settings.profiles.find(p => p.id === settings.activeProfileId) || settings.profiles[0];
 }
 
 // --- NEW: Settings & Profiles API Endpoints (Protected) ---
@@ -152,24 +185,29 @@ app.get('/api/settings', isAuthenticated, (req, res) => {
 
 app.post('/api/settings', isAuthenticated, (req, res) => {
     const newSettings = req.body;
-    if (!newSettings || !newSettings.profiles || !newSettings.buffer) {
+
+    if (!newSettings || !newSettings.profiles || !newSettings.buffer || !newSettings.activeProfileId) {
         return res.status(400).json({ error: 'Invalid settings object.' });
     }
-    // Ensure only one profile is active
-    let activeFound = false;
-    for (const profile of newSettings.profiles) {
-        if (profile.active && !activeFound) {
-            activeFound = true;
-        } else if (profile.active && activeFound) {
-            profile.active = false; // Ensure only one is active
-        }
-    }
-    if (!activeFound && newSettings.profiles.length > 0) {
-        newSettings.profiles[0].active = true; // Default to first if none are active
+    
+    // --- FIX: BUG A ---
+    // The client sends the *entire* state, including the 'activeProfileId'.
+    // We just need to validate that the ID it sent actually exists in the profiles list.
+    const activeProfileExists = newSettings.profiles.some(p => p.id === newSettings.activeProfileId);
+    
+    // If the active ID doesn't exist (e.g., it was deleted), default to the first profile
+    if (!activeProfileExists && newSettings.profiles.length > 0) {
+        newSettings.activeProfileId = newSettings.profiles[0].id;
+    } else if (newSettings.profiles.length === 0) {
+        // This should never happen, but as a safeguard
+        return res.status(500).json({ error: 'Cannot save with no profiles.' });
     }
 
+    // Now, save the validated settings
     if (saveSettings(newSettings)) {
-        res.json({ message: 'Settings saved.' });
+        // --- FIX: BUG B ---
+        // Return the *entire* saved object, not just a message.
+        res.json(newSettings);
     } else {
         res.status(500).json({ error: 'Failed to save settings to disk.' });
     }
@@ -367,7 +405,8 @@ class BufferManager {
         // Use the full URI queue to download, but the original segments for filenames
         for (let i = 0; i < this.segmentQueue.length; i++) {
             const segmentUrl = this.segmentQueue[i];
-            const filename = originalSegments[i].uri.split('/').pop();
+            // --- FIX: Handle query params in filenames ---
+            const filename = originalSegments[i].uri.split('?')[0].split('/').pop();
             
             if (this.stopFlag) return;
             if (!this.downloadedSegments.has(filename)) {
@@ -391,15 +430,19 @@ class BufferManager {
             }
         }
         // Clean up old segments
-        this.cleanupOldSegments(originalSegments.map(s => s.uri.split('/').pop()));
+        // --- FIX: Handle query params in filenames ---
+        this.cleanupOldSegments(originalSegments.map(s => s.uri.split('?')[0].split('/').pop()));
     }
 
     writeLocalPlaylist(playlist) {
         // This creates a new .m3u8 file that points to our locally buffered segments.
         // These segments are in /var/www/hls/buffer/
         
+        // --- FIX: Handle query params in filenames ---
+        const getFilename = (uri) => uri.split('?')[0].split('/').pop();
+
         // Filter playlist to only segments we *actually* have downloaded
-        const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(s.uri.split('/').pop()));
+        const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(getFilename(s.uri)));
 
         // We only want the *end* of the available list, up to our target buffer size
         const bufferedSegments = availableSegments.slice(-this.targetBufferSegments);
@@ -407,8 +450,10 @@ class BufferManager {
         if(bufferedSegments.length === 0) return; // Not ready yet
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
-        // Use the media sequence of the *first segment we are including*
-        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${bufferedSegments[0].mediaSequence}\n`;
+        
+        // --- FIX: Handle missing mediaSequence ---
+        const firstSequence = bufferedSegments[0].mediaSequence || playlist.mediaSequence || 0;
+        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${firstSequence}\n`;
 
         for (const segment of bufferedSegments) {
             if (segment.discontinuity) {
@@ -416,7 +461,7 @@ class BufferManager {
             }
             m3u8Content += `#EXTINF:${segment.duration.toFixed(6)},\n`;
             // Point to the *relative path* that Nginx will serve
-            m3u8Content += `buffer/${segment.uri.split('/').pop()}\n`; 
+            m3u8Content += `buffer/${getFilename(segment.uri)}\n`; 
         }
 
         try {
@@ -477,14 +522,12 @@ async function startStream(sourceUrl) {
             // --- RACE CONDITION FIX ---
             const { localPlaylistPath } = await bufferManager.start();
             
-            streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
+            // --- FIX: Use 127.0.0.1 for consistency ---
+            streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8?t=${Date.now()}`; // Add cache buster
             console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
-            // --- FIX: BUG #1 - Remove crashing line ---
-            // The line below was causing the crash. It is now removed.
-            // logStreamMessage(`Buffer failed: ${error.message}`, true); 
             stopAllStreamProcesses(); 
             return;
         }
@@ -501,6 +544,12 @@ async function startStream(sourceUrl) {
     // --- IDEA 2 LOGIC ---
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     
+    if (!activeProfile || !activeProfile.command) {
+        console.error("[FFmpeg] FATAL ERROR: No active profile found or profile is missing command. Aborting.");
+        stopAllStreamProcesses();
+        return;
+    }
+
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl)
         .replace(/{userAgent}/g, userAgent);
@@ -520,7 +569,13 @@ async function startStream(sourceUrl) {
 
     ffmpegProcess.stderr.on('data', (data) => {
         const stderrStr = data.toString();
-        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening') && !stderrStr.includes('dropping overlapping extension')) {
+        // Filter out noisy progress messages
+        if (!stderrStr.startsWith('frame=') && 
+            !stderrStr.startsWith('size=') && 
+            !stderrStr.startsWith('Opening') && 
+            !stderrStr.includes('dropping overlapping') &&
+            !stderrStr.includes('Past duration') &&
+            !stderrStr.includes('Last message repeated')) {
              console.error(`[ffmpeg stderr]: ${stderrStr.trim()}`);
         }
     });
@@ -532,7 +587,8 @@ async function startStream(sourceUrl) {
             if (bufferManager && bufferManager.stopFlag === false) {
                 console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
                 safeToStop = false; // Don't stop buffer, we are restarting
-                startStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
+                // --- FIX: Pass the LOCAL playlist URL to restart ---
+                startStream(`http://127.0.0.1:8994/local_playlist.m3u8?t=${Date.now()}`); 
             }
         }
         
@@ -740,23 +796,28 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
         const lines = data.split('\n').filter(line => line.trim() !== '');
         const viewers = new Map();
         const now = Date.now();
-        const logRegex = /([\d\.:a-f]+) - \[([^\]]+)\]/;
+        const logRegex = /([\d\.:a-fA-F]+) - \[([^\]]+)\]/; // Support IPv6
 
         for (const line of lines) {
             const match = line.match(logRegex);
             if (!match) continue;
 
             const ip = match[1];
+            // --- FIX: More robust date parsing for Nginx log format ---
+            // Nginx format: 19/Sep/2025:11:30:00 +0200
             const timestampStr = match[2].replace(/\//g, ' ').replace(':', ' ');
-            const timestamp = Date.parse(timestampStr);
-
-            if (isNaN(timestamp)) continue;
-            
-            const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp, isBlocked: blockedIps.has(ip) };
-            if (timestamp > viewer.lastSeen) viewer.lastSeen = timestamp;
-            if (timestamp < viewer.firstSeen) viewer.firstSeen = timestamp;
-            viewer.isBlocked = blockedIps.has(ip); 
-            viewers.set(ip, viewer);
+            try {
+                const timestamp = Date.parse(timestampStr);
+                if (isNaN(timestamp)) continue;
+                
+                const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp, isBlocked: blockedIps.has(ip) };
+                if (timestamp > viewer.lastSeen) viewer.lastSeen = timestamp;
+                if (timestamp < viewer.firstSeen) viewer.firstSeen = timestamp;
+                viewer.isBlocked = blockedIps.has(ip); 
+                viewers.set(ip, viewer);
+            } catch (dateErr) {
+                // Ignore invalid date lines
+            }
         }
 
         const activeViewers = Array.from(viewers.values()).filter(v => (now - v.lastSeen) < VIEWER_TIMEOUT_MS);
@@ -794,4 +855,3 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
-
