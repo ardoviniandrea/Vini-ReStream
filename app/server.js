@@ -7,9 +7,11 @@ const session = require('express-session');
 const SQLiteStore = require('connect-sqlite3')(session);
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
-// NEW: Dependencies for the pre-fetch buffer
-const axios = require('axios'); // For downloading segments
-const m3u8Parser = require('m3u8-parser'); // For reading playlists
+
+// --- NEW DEPENDENCIES ---
+// We need axios for reliable HTTP requests (to download segments) and m3u8-parser
+const axios = require('axios');
+const { Parser } = require('m3u8-parser');
 
 const app = express();
 const port = 3000;
@@ -18,53 +20,55 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- Persistent Data Paths ---
-const DATA_DIR = '/data';
+// --- DB Setup ---
+const DATA_DIR = '/data'; // This is the persistent volume mounted by Docker
 const DB_PATH = path.join(DATA_DIR, 'restream.db');
-const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json'); // NEW: For settings
-const HLS_DIR = '/var/www/hls'; // Nginx serves from here
-const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
-const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
+const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json'); // --- NEW: Settings file ---
+let db;
 
-// Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+try {
+    if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR);
+    }
+    
+    db = new sqlite3.Database(DB_PATH, (err) => {
+        if (err) {
+            console.error('Error opening database:', err.message);
+            // If the DB can't be opened, the app is useless.
+            process.exit(1);
+        } else {
+            console.log('Connected to the SQLite database.');
+            db.run(`CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )`, (err) => {
+                if (err) console.error("Error creating users table:", err.message);
+                else console.log("'users' table is ready.");
+            });
+        }
+    });
+} catch (dirErr) {
+    console.error("Failed to create or access /data directory.", dirErr);
+    process.exit(1);
 }
 
-// --- DB Setup ---
-const db = new sqlite3.Database(DB_PATH, (err) => {
-    if (err) {
-        console.error('Error opening database:', err.message);
-    } else {
-        console.log('Connected to the SQLite database.');
-        db.run(`CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )`, (err) => {
-            if (err) console.error("Error creating users table:", err.message);
-            else console.log("'users' table is ready.");
-        });
-    }
-});
-
 // --- Session Setup ---
-// Use environment variable from docker-compose, with a fallback
 const SESSION_SECRET = process.env.SESSION_SECRET || 'supersecretkeyforrestream';
 if (SESSION_SECRET === 'supersecretkeyforrestream') {
-    console.warn('[SECURITY] Using default SESSION_SECRET. Please set this in your .env file!');
+    console.warn("WARNING: Using default SESSION_SECRET. Please set this in your docker-compose.yml or .env file for production.");
 }
 
 app.use(session({
     store: new SQLiteStore({
-        db: path.basename(DB_PATH),
+        db: 'restream.db',
         dir: DATA_DIR,
         table: 'sessions'
     }),
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 } // 1 week
+    cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
 
 // --- Auth Middleware ---
@@ -76,342 +80,482 @@ const isAuthenticated = (req, res, next) => {
     }
 };
 
-// --- Stream State & Constants ---
-let ffmpegProcess = null;
-let currentStreamUrl = "";
-let bufferManager = null; // NEW: To hold the buffer service
-const VIEWER_TIMEOUT_MS = 15 * 1000; // 15 seconds
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+// ================================================================
+// --- NEW: SETTINGS MANAGEMENT ---
+// ================================================================
 
-// --- NEW: Settings Management (Ideas 1 & 2) ---
-
-const DEFAULT_SETTINGS = {
-    buffer: {
-        enabled: false,
-        delaySeconds: 30
-    },
-    // Define default profiles
-    profiles: [
-        {
-            id: 'default-cpu-copy',
-            name: 'CPU - Direct Copy (Default)',
-            command: '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "{userAgent}" -i "{streamUrl}" -c copy',
-            isDefault: true
-        },
-        {
-            id: 'default-gpu-nvidia',
-            name: 'NVIDIA - NVENC Encode (GPU)',
-            command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq',
-            isDefault: false
+function getDefaultSettings() {
+    return {
+        profiles: [
+            {
+                id: 'default-cpu',
+                name: 'Default (CPU Stream Copy)',
+                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                active: true
+            },
+            {
+                id: 'nvidia-gpu',
+                name: 'NVIDIA (NVENC Re-encode)',
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                active: false
+            }
+        ],
+        buffer: {
+            enabled: true,
+            delaySeconds: 30
         }
-    ],
-    activeProfileId: 'default-cpu-copy'
-};
+    };
+}
 
-// Function to get current settings
 function getSettings() {
     if (!fs.existsSync(SETTINGS_PATH)) {
         console.log('Settings file not found, creating default settings.');
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(DEFAULT_SETTINGS, null, 2));
-        return DEFAULT_SETTINGS;
+        const defaults = getDefaultSettings();
+        try {
+            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaults, null, 2));
+            return defaults;
+        } catch (e) {
+            console.error("Failed to write default settings:", e);
+            return getDefaultSettings(); // Return from memory
+        }
     }
     try {
-        const settingsData = fs.readFileSync(SETTINGS_PATH, 'utf-8');
-        // Simple merge to ensure new default keys are added if missing
-        const savedSettings = JSON.parse(settingsData);
-        const mergedSettings = { ...DEFAULT_SETTINGS, ...savedSettings };
-        mergedSettings.buffer = { ...DEFAULT_SETTINGS.buffer, ...savedSettings.buffer };
-        
-        // Ensure default profiles exist
-        DEFAULT_SETTINGS.profiles.forEach(defaultProfile => {
-            if (!mergedSettings.profiles.some(p => p.id === defaultProfile.id)) {
-                mergedSettings.profiles.push(defaultProfile);
-            }
-        });
-
-        return mergedSettings;
+        const settingsData = fs.readFileSync(SETTINGS_PATH, 'utf8');
+        return JSON.parse(settingsData);
     } catch (e) {
-        console.error('Error reading settings.json, falling back to defaults:', e);
-        return DEFAULT_SETTINGS;
+        console.error("Failed to parse settings.json, returning defaults:", e);
+        return getDefaultSettings(); // Return defaults if parsing fails
     }
 }
 
-// Function to save settings
 function saveSettings(settings) {
     try {
         fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
         console.log('Settings saved successfully.');
+        return true;
     } catch (e) {
-        console.error('Error saving settings.json:', e);
+        console.error("Failed to save settings:", e);
+        return false;
     }
 }
 
-// --- NEW: Pre-fetch Buffer Manager (Idea 1) ---
+function getActiveProfile() {
+    const settings = getSettings();
+    return settings.profiles.find(p => p.active === true) || settings.profiles[0];
+}
+
+// --- NEW: Settings & Profiles API Endpoints (Protected) ---
+
+app.get('/api/settings', isAuthenticated, (req, res) => {
+    res.json(getSettings());
+});
+
+app.post('/api/settings', isAuthenticated, (req, res) => {
+    const newSettings = req.body;
+    if (!newSettings || !newSettings.profiles || !newSettings.buffer) {
+        return res.status(400).json({ error: 'Invalid settings object.' });
+    }
+    // Ensure only one profile is active
+    let activeFound = false;
+    for (const profile of newSettings.profiles) {
+        if (profile.active && !activeFound) {
+            activeFound = true;
+        } else if (profile.active && activeFound) {
+            profile.active = false; // Ensure only one is active
+        }
+    }
+    if (!activeFound && newSettings.profiles.length > 0) {
+        newSettings.profiles[0].active = true; // Default to first if none are active
+    }
+
+    if (saveSettings(newSettings)) {
+        res.json({ message: 'Settings saved.' });
+    } else {
+        res.status(500).json({ error: 'Failed to save settings to disk.' });
+    }
+});
+
+
+// ================================================================
+// --- STREAM STATE & HELPERS ---
+// ================================================================
+
+let ffmpegProcess = null;
+let currentStreamUrl = "";
+let bufferManager = null; // --- NEW: Handle for the buffer manager
+const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
+const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
+const VIEWER_TIMEOUT_MS = 15 * 1000;
+
+// Function to reload nginx config
+function reloadNginx() {
+    exec('supervisorctl -c /etc/supervisor/conf.d/supervisord.conf signal HUP nginx', (err, stdout, stderr) => {
+        if (err) console.error('Failed to reload nginx:', stderr);
+        else console.log('Nginx reloaded successfully.');
+    });
+}
+
+// Function to clean up all HLS files and local playlists
+function cleanupHlsFiles() {
+    console.log('[Cleanup] All HLS segments and playlists cleared.');
+    try {
+        // Delete main nginx-served playlist
+        if (fs.existsSync('/var/www/hls/live.m3u8')) {
+            fs.unlinkSync('/var/www/hls/live.m3u8');
+        }
+        // Delete all .ts segments
+        fs.readdirSync('/var/www/hls').forEach(file => {
+            if (file.endsWith('.ts')) {
+                fs.unlinkSync(path.join('/var/www/hls', file));
+            }
+        });
+        // Delete our internally generated local playlist
+        if (fs.existsSync('/var/www/hls/local_playlist.m3u8')) {
+            fs.unlinkSync('/var/www/hls/local_playlist.m3u8');
+        }
+    } catch (e) {
+        console.error('[Cleanup] Error during HLS file cleanup:', e.message);
+    }
+}
+
+// Function to stop all streaming processes
+function stopAllStreamProcesses() {
+    console.log('Stopping all stream processes...');
+    if (bufferManager) {
+        bufferManager.stop();
+        bufferManager = null;
+    }
+    if (ffmpegProcess) {
+        ffmpegProcess.kill('SIGKILL');
+        ffmpegProcess = null;
+    }
+    currentStreamUrl = "";
+    cleanupHlsFiles(); // Clean up files on any stop
+}
+
+
+// ================================================================
+// --- NEW: PRE-FETCH BUFFER MANAGER (IDEA 1) ---
+// ================================================================
 
 class BufferManager {
     constructor(sourceUrl, bufferSeconds) {
         this.sourceUrl = sourceUrl;
-        // Calculate how many segments to hold based on an assumed segment duration (4s)
-        this.targetSegmentCount = Math.max(3, Math.ceil(bufferSeconds / 4)); // Hold at least 3 segments
-        this.segmentBuffer = []; // Holds filenames of segments we have
-        this.processedSegments = new Set(); // Tracks all segments we've seen
-        this.localPlaylistPath = path.join(HLS_DIR, 'local_playlist.m3u8');
-        this.interval = null;
-        this.mediaSequence = 0;
-        this.isStopped = false;
-        this.httpClient = axios.create({ timeout: 5000, responseType: 'stream' }); // 5s timeout
-        console.log(`[Buffer] Manager started. Target buffer: ${this.targetSegmentCount} segments.`);
+        this.targetBufferSegments = Math.max(1, Math.floor(bufferSeconds / 4)); // Assuming avg 4s segments
+        this.bufferDir = path.join(__dirname, 'buffer');
+        this.localPlaylistPath = path.join('/var/www/hls', 'local_playlist.m3u8'); // Nginx serves this
+        this.segmentQueue = [];    // List of segment filenames (e.g., "seg-101.ts")
+        this.downloadedSegments = new Set();
+        this.segmentBaseUrl = '';
+        this.stopFlag = false;
+        this.timeoutId = null;
+        this.initialPlaylistReady = null; // --- FIX: Promise for race condition
+        this.resolveInitialPlaylist = null;
+        this.rejectInitialPlaylist = null;
+
+        console.log(`[Buffer] Manager started. Target buffer: ${this.targetBufferSegments} segments.`);
+
+        // Ensure buffer directory exists and is clean
+        try {
+            if (fs.existsSync(this.bufferDir)) {
+                fs.rmSync(this.bufferDir, { recursive: true, force: true });
+            }
+            fs.mkdirSync(this.bufferDir);
+        } catch (e) {
+            console.error('[Buffer] Failed to create or clean buffer directory:', e);
+        }
     }
 
+    /**
+     * Public start method. Returns a promise that resolves when the first playlist is ready.
+     */
     start() {
-        this.isStopped = false;
-        const tick = async () => {
-            if (this.isStopped) return;
-            try {
-                await this.fetchAndProcessPlaylist();
-            } catch (e) {
-                console.error(`[Buffer] Error in tick: ${e.message}`);
-            }
-            if (!this.isStopped) {
-                this.interval = setTimeout(tick, 2000); // Poll every 2 seconds
-            }
-        };
-        tick(); // Start immediately
+        this.initialPlaylistReady = new Promise((resolve, reject) => {
+            this.resolveInitialPlaylist = resolve;
+            this.rejectInitialPlaylist = reject;
+        });
+
+        this.fetchPlaylist(); // Start the loop
+        return this.initialPlaylistReady; // Return the promise
     }
 
     stop() {
-        this.isStopped = true;
-        if (this.interval) {
-            clearTimeout(this.interval);
+        this.stopFlag = true;
+        if (this.timeoutId) {
+            clearTimeout(this.timeoutId);
         }
         console.log('[Buffer] Manager stopped.');
-        this.cleanupHlsFiles(); // Clean up everything on stop
+        // Clean up temporary buffer dir on stop
+        try {
+            if (fs.existsSync(this.bufferDir)) {
+                fs.rmSync(this.bufferDir, { recursive: true, force: true });
+            }
+        } catch (e) {
+            console.error('[Buffer] Failed to delete buffer directory on stop:', e);
+        }
     }
 
-    async fetchAndProcessPlaylist() {
-        // 1. Fetch the source playlist
-        const response = await axios.get(this.sourceUrl, { timeout: 5000 });
-        const parser = new m3u8Parser.Parser();
-        parser.push(response.data);
-        parser.end();
+    async fetchPlaylist() {
+        if (this.stopFlag) return;
 
-        const playlist = parser.manifest;
-        if (!playlist.segments || playlist.segments.length === 0) {
-            console.warn('[Buffer] Source playlist is empty or invalid.');
-            return;
-        }
+        try {
+            const response = await axios.get(this.sourceUrl, { timeout: 3000 });
+            const parser = new Parser();
+            parser.push(response.data);
+            parser.end();
 
-        // 2. Download any new segments
-        const segmentsToDownload = playlist.segments.filter(seg => !this.processedSegments.has(seg.uri));
-        for (const segment of segmentsToDownload) {
-            if (this.isStopped) break;
-            const segmentFilename = path.basename(new URL(segment.uri, this.sourceUrl).pathname);
-            const segmentUrl = new URL(segment.uri, this.sourceUrl).href;
-            const localPath = path.join(HLS_DIR, segmentFilename);
+            const playlist = parser.manifest;
+            if (!playlist.segments || playlist.segments.length === 0) {
+                console.warn('[Buffer] Source playlist is empty or invalid.');
+                if (this.rejectInitialPlaylist) { // FIX: Reject the promise if it's still pending
+                    this.rejectInitialPlaylist(new Error("Source playlist is empty or invalid."));
+                    this.rejectInitialPlaylist = null; // Ensure it only fires once
+                }
+                throw new Error("Empty or invalid playlist");
+            }
 
-            try {
-                // Download the segment
-                const segmentResponse = await this.httpClient.get(segmentUrl);
-                const writer = fs.createWriteStream(localPath);
-                segmentResponse.data.pipe(writer);
-                await new Promise((resolve, reject) => {
-                    writer.on('finish', resolve);
-                    writer.on('error', reject);
-                });
+            // Determine the base URL for segments (relative vs absolute)
+            const firstSegmentUri = playlist.segments[0].uri;
+            if (firstSegmentUri.startsWith('http')) {
+                this.segmentBaseUrl = new URL(firstSegmentUri).origin;
+            } else {
+                this.segmentBaseUrl = new URL(this.sourceUrl).origin;
+            }
 
-                // Add to our buffer ONLY after it's successfully downloaded
-                this.segmentBuffer.push({ ...segment, localFile: segmentFilename });
-                this.processedSegments.add(segment.uri);
-                console.log(`[Buffer] Downloaded segment: ${segmentFilename}`);
+            const segmentFilenames = playlist.segments.map(s => s.uri.split('/').pop());
+            this.segmentQueue = segmentFilenames; // Update the queue with the latest list
+            
+            // Start downloading segments from the queue
+            this.downloadSegments();
+            // Write the local playlist for FFmpeg to read from
+            this.writeLocalPlaylist(playlist);
 
-            } catch (e) {
-                console.error(`[Buffer] Failed to download segment ${segmentFilename}: ${e.message}`);
-                // Stop processing this loop if a download fails, will retry on next tick
-                break; 
+            // FIX: Resolve the promise only AFTER the first playlist is written
+            if (this.resolveInitialPlaylist) {
+                console.log('[Buffer] Initial playlist is ready.');
+                this.resolveInitialPlaylist({ localPlaylistPath: this.localPlaylistPath });
+                this.resolveInitialPlaylist = null; // Ensure it only fires once
+                this.rejectInitialPlaylist = null;
+            }
+
+            // Schedule the next fetch based on segment duration
+            const refreshInterval = (playlist.segments[0].duration || 4) * 1000;
+            this.timeoutId = setTimeout(() => this.fetchPlaylist(), refreshInterval);
+
+        } catch (error) {
+            console.error('[Buffer] Error fetching source playlist:', error.message);
+            if (!this.stopFlag) {
+                this.timeoutId = setTimeout(() => this.fetchPlaylist(), 2000); // Retry faster on error
+            }
+            // FIX: If we fail *before* the first playlist is ready, reject the promise
+            if (this.rejectInitialPlaylist) {
+                this.rejectInitialPlaylist(error);
+                this.rejectInitialPlaylist = null;
+                this.resolveInitialPlaylist = null;
             }
         }
-
-        // 3. Prune the buffer to match the target size
-        const segmentsToPurge = [];
-        while (this.segmentBuffer.length > this.targetSegmentCount) {
-            segmentsToPurge.push(this.segmentBuffer.shift()); // Remove from the start
-        }
-
-        // 4. Update Media Sequence
-        if (this.segmentBuffer.length > 0 && segmentsToPurge.length > 0) {
-            this.mediaSequence++;
-        }
-        if (playlist.mediaSequence && this.mediaSequence === 0) {
-            this.mediaSequence = playlist.mediaSequence - this.segmentBuffer.length;
-            if (this.mediaSequence < 0) this.mediaSequence = 0;
-        }
-
-
-        // 5. Generate the local playlist file for ffmpeg to read
-        this.generateLocalPlaylist(playlist.targetDuration);
-
-        // 6. Asynchronously delete the purged segment files from disk
-        this.cleanupSegments(segmentsToPurge);
     }
 
-    generateLocalPlaylist(targetDuration) {
-        if (this.segmentBuffer.length === 0) return;
+    async downloadSegments() {
+        // Download segments from the queue that we don't already have
+        for (const filename of this.segmentQueue) {
+            if (this.stopFlag) return;
+            if (!this.downloadedSegments.has(filename)) {
+                const segmentUrl = new URL(filename, this.segmentBaseUrl).href;
+                const localPath = path.join(this.bufferDir, filename);
 
-        let content = `#EXTM3U\n`;
-        content += `#EXT-X-VERSION:3\n`;
-        content += `#EXT-X-TARGETDURATION:${Math.ceil(targetDuration || 6)}\n`;
-        content += `#EXT-X-MEDIA-SEQUENCE:${this.mediaSequence}\n`;
-        
-        this.segmentBuffer.forEach(segment => {
-            content += `#EXTINF:${segment.duration.toFixed(6)},\n`;
-            content += `${segment.localFile}\n`; // Use the local filename
-        });
-
-        // Write the local playlist that ffmpeg will consume
-        fs.writeFileSync(this.localPlaylistPath, content);
-    }
-
-    cleanupSegments(segmentsToPurge) {
-        segmentsToPurge.forEach(segment => {
-            const localPath = path.join(HLS_DIR, segment.localFile);
-            fs.unlink(localPath, (err) => {
-                if (err) console.error(`[Buffer] Failed to delete old segment ${segment.localFile}: ${err.message}`);
-                else console.log(`[Buffer] Cleaned up segment: ${segment.localFile}`);
-            });
-        });
-    }
-
-    cleanupHlsFiles() {
-        // Clear all segments and playlists from the HLS directory
-        fs.readdir(HLS_DIR, (err, files) => {
-            if (err) return;
-            for (const file of files) {
-                if (file.endsWith('.ts') || file.endsWith('.m3u8')) {
-                    fs.unlink(path.join(HLS_DIR, file), err => {
-                        if (err) console.error(`[Cleanup] Failed to delete ${file}: ${err.message}`);
+                try {
+                    const response = await axios.get(segmentUrl, { responseType: 'stream', timeout: 5000 });
+                    const writer = fs.createWriteStream(localPath);
+                    response.data.pipe(writer);
+                    
+                    await new Promise((resolve, reject) => {
+                        writer.on('finish', resolve);
+                        writer.on('error', reject);
                     });
+
+                    this.downloadedSegments.add(filename);
+                } catch (error) {
+                    console.warn(`[Buffer] Failed to download segment ${filename}:`, error.message);
+                    // If a segment download fails, we break and wait for the next playlist refresh
+                    // rather than hammering a potentially dead segment.
+                    break; 
                 }
             }
-            console.log('[Cleanup] All HLS segments and playlists cleared.');
-        });
+        }
+        // Clean up old segments
+        this.cleanupOldSegments();
+    }
+
+    writeLocalPlaylist(playlist) {
+        // This creates a new .m3u8 file that points to our locally buffered segments,
+        // which are served by Nginx from /var/www/hls/buffer/ (via a symlink or direct write, let's serve them from /var/www/hls/)
+        // Actually, let's write them to /var/www/hls directly to simplify Nginx.
+        // NO - ffmpeg needs to read from our *local* folder. Nginx needs to serve *ffmpeg's output*.
+        // The /var/www/hls/local_playlist.m3u8 should point to files in /usr/src/app/buffer
+        // Wait, no. FFmpeg is *reading* this playlist. So the playlist just needs to point to the files on disk.
+        // And Nginx must serve *this playlist file* to FFmpeg (which is running as a client)
+
+        // Let's create the buffer dir INSIDE /var/www/hls to avoid all permission/serving issues.
+        // Yes, this is much simpler.
+        const nginxBufferDir = '/var/www/hls/buffer';
+        if (!fs.existsSync(nginxBufferDir)) fs.mkdirSync(nginxBufferDir);
+
+        // This path is correct, as FFmpeg will fetch it over HTTP
+        const localPlaylistPath = '/var/www/hls/local_playlist.m3u8'; 
+
+        // Filter playlist to only segments we *actually* have downloaded
+        const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(s.uri.split('/').pop()));
+
+        // We only want the *end* of the available list, up to our target buffer size
+        const bufferedSegments = availableSegments.slice(-this.targetBufferSegments);
+        
+        if(bufferedSegments.length === 0) return; // Not ready yet
+
+        let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
+        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${bufferedSegments[0].mediaSequence || playlist.mediaSequence}\n`;
+
+        for (const segment of bufferedSegments) {
+            if (segment.discontinuity) {
+                m3u8Content += '#EXT-X-DISCONTINUITY\n';
+            }
+            m3u8Content += `#EXTINF:${segment.duration.toFixed(6)},\n`;
+            // Point to the *relative path* that Nginx will serve
+            m3u8Content += `buffer/${segment.uri.split('/').pop()}\n`; 
+        }
+
+        // Write the new playlist for FFmpeg to pick up
+        try {
+             fs.writeFileSync(localPlaylistPath, m3u8Content);
+        } catch (e) {
+            console.error('[Buffer] Failed to write local playlist file:', e.message);
+        }
+    }
+
+    cleanupOldSegments() {
+        // This logic keeps our buffer folder from growing forever
+        const segmentsToKeep = new Set(this.segmentQueue.slice(-this.targetBufferSegments * 2)); // Keep 2x buffer
+        for (const filename of this.downloadedSegments) {
+            if (!segmentsToKeep.has(filename)) {
+                try {
+                    const localPath = path.join(this.bufferDir, filename);
+                    if (fs.existsSync(localPath)) {
+                        fs.unlinkSync(localPath);
+                    }
+                    this.downloadedSegments.delete(filename);
+                } catch (e) {
+                    console.warn(`[Buffer] Failed to cleanup segment ${filename}:`, e.message);
+                }
+            }
+        }
     }
 }
 
-// --- Stream Helper Functions ---
 
-// NEW: Spawns ffmpeg using args from the active profile
-function spawnFfmpeg(sourceUrl, profileCommand) {
+// ================================================================
+// --- STREAM START/STOP (MODIFIED) ---
+// ================================================================
+
+async function startStream(sourceUrl) {
     if (ffmpegProcess) {
         console.log('Killing existing ffmpeg process...');
-        ffmpegProcess.kill('SIGKILL');
-        ffmpegProcess = null;
+        stopAllStreamProcesses();
     }
 
-    // Replace placeholders in the profile command
-    const processedCommand = profileCommand
-        .replace(/{streamUrl}/g, sourceUrl)
-        .replace(/{userAgent}/g, DEFAULT_USER_AGENT); // Use a standard default UA
+    console.log(`[Stream Start] Starting stream from: ${sourceUrl}`);
+    const settings = getSettings();
+    const activeProfile = getActiveProfile();
+    let streamInputUrl = sourceUrl;
+    const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8'); // Check if we are restarting ourself
 
-    // Split the profile command string into an args array
-    let profileArgs = [];
-    try {
-        profileArgs = processedCommand.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g).map(arg => arg.replace(/^["']|["']$/g, ''));
-    } catch(e) {
-        console.error(`[FFmpeg] FATAL: Could not parse profile command: ${processedCommand}`);
-        return;
+    // --- IDEA 1 LOGIC ---
+    // If buffer is enabled AND this is a NEW request (not a restart pointing at ourself), start the buffer.
+    if (settings.buffer.enabled && !isLocalPlaylist) {
+        console.log('[Stream Start] Using Pre-fetch Buffer mode.');
+        try {
+            bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
+            // --- RACE CONDITION FIX ---
+            // This now waits for the buffer manager to fetch the source, download segments,
+            // and create the first local_playlist.m3u8 file *before* ffmpeg starts.
+            const { localPlaylistPath } = await bufferManager.start();
+            
+            // Nginx serves on port 8994, and ffmpeg will access this as a client.
+            // This MUST be the HTTP URL, not the file system path.
+            streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
+            console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
+
+        } catch (error) {
+            console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
+            logStreamMessage(`Buffer failed: ${error.message}`, true);
+            stopAllStreamProcesses(); // Clean up partial setup
+            return; // Do not start ffmpeg if buffer fails
+        }
+    } else if (isLocalPlaylist) {
+        console.log('[Stream Start] Restarting FFmpeg against existing buffer.');
+    } else {
+        console.log('[Stream Start] Using Direct Stream mode (Buffer disabled).');
     }
 
-    // These are the *static* HLS output args for this project.
-    const outputArgs = [
-        '-f', 'hls',
-        '-hls_time', '4',
-        '-hls_list_size', '10',
-        '-hls_flags', 'delete_segments+discont_start+omit_endlist',
-        '-hls_segment_filename', `${HLS_DIR}/segment_%03d.ts`,
-        `${HLS_DIR}/live.m3u8`
-    ];
+    // --- IDEA 2 LOGIC ---
+    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+    
+    // Replace placeholders in the selected command
+    const commandWithPlaceholders = activeProfile.command
+        .replace(/{streamUrl}/g, streamInputUrl)
+        .replace(/{userAgent}/g, userAgent);
 
-    const finalArgs = [...profileArgs, ...outputArgs];
+    const args = commandWithPlaceholders.split(' ').slice(1); // Split command into args, remove 'ffmpeg'
+    
+    console.log(`[FFmpeg] Starting process with command: ffmpeg ${args.join(' ')}`);
 
-    console.log(`[FFmpeg] Starting process with command: ffmpeg ${finalArgs.join(' ')}`);
+    ffmpegProcess = spawn('ffmpeg', args);
+    currentStreamUrl = sourceUrl; // Store the *original* source URL
 
-    ffmpegProcess = spawn('ffmpeg', finalArgs);
-    currentStreamUrl = sourceUrl; // Store the *original* source URL for the UI
+    ffmpegProcess.stdout.on('data', (data) => {
+        // console.log(`ffmpeg stdout: ${data}`);
+    });
 
     ffmpegProcess.stderr.on('data', (data) => {
-        console.error(`[ffmpeg stderr]: ${data}`);
+        const stderrStr = data.toString();
+        // Log to console, but avoid spamming with segment/frame data
+        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening')) {
+             console.error(`[ffmpeg stderr]: ${stderrStr.trim()}`);
+        }
     });
 
     ffmpegProcess.on('close', (code) => {
         console.log(`[ffmpeg] process exited with code ${code}`);
-        if (ffmpegProcess) {
-            ffmpegProcess = null;
-            currentStreamUrl = "";
-        }
-        // If the process stops (e.g., error), also stop the buffer manager
-        if (bufferManager) {
-            bufferManager.stop();
-            bufferManager = null;
+        if (code !== 0 && code !== 255) { // 255 is normal kill
+            // If ffmpeg fails, and we're in buffer mode, it might be a temporary network flap.
+            // Let's try restarting ffmpeg against the same local buffer.
+            if (bufferManager && !this.stopFlag) {
+                console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
+                startStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
+            }
+        } else {
+            // Normal exit, stop everything
+             if (ffmpegProcess) { // Check if it hasn't been stopped by /api/stop
+                stopAllStreamProcesses();
+             }
         }
     });
 
     ffmpegProcess.on('error', (err) => {
         console.error('[ffmpeg] Failed to start process:', err);
-        ffmpegProcess = null;
-        currentStreamUrl = "";
-        if (bufferManager) {
-            bufferManager.stop();
-            bufferManager = null;
-        }
-    });
-}
-
-// Function to stop all streaming processes
-function stopAllStreams() {
-    console.log('Stopping all stream processes...');
-    if (ffmpegProcess) {
-        ffmpegProcess.kill('SIGKILL');
-        ffmpegProcess = null;
-        currentStreamUrl = "";
-    }
-    if (bufferManager) {
-        bufferManager.stop(); // This will also trigger cleanup
-        bufferManager = null;
-    } else {
-        // If buffer wasn't running, do a manual cleanup
-        (new BufferManager()).cleanupHlsFiles();
-    }
-
-    // Clear logs and blocklist on stop
-    try {
-        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
-        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
-        console.log('Cleared HLS log and blocklist on stream stop.');
-        reloadNginx();
-    } catch (writeErr) {
-        console.error('Failed to clear logs or blocklist:', writeErr);
-    }
-}
-
-// Function to reload nginx config
-function reloadNginx() {
-    exec('supervisorctl -c /etc/supervisor/conf.d/supervisord.conf signal HUP nginx', (err, stdout, stderr) => {
-        if (err) {
-            console.error('Failed to reload nginx:', stderr);
-        } else {
-            console.log('Nginx reloaded successfully.');
-        }
+        stopAllStreamProcesses();
     });
 }
 
 
-// --- Auth API Endpoints (Unchanged) ---
+// ================================================================
+// --- ORIGINAL AUTH & API ENDPOINTS (MODIFIED) ---
+// ================================================================
+
+// --- Auth API Endpoints ---
+
 app.get('/api/auth/check', (req, res) => {
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-        if (err) {
-            console.error("Auth check DB error:", err);
-            return res.status(500).json({ error: 'Database error' });
-        }
+        if (err) return res.status(500).json({ error: 'Database error' });
         const hasUsers = row.count > 0;
         if (req.session.userId) {
             res.json({ loggedIn: true, username: req.session.username, hasUsers: hasUsers });
@@ -426,14 +570,14 @@ app.post('/api/auth/register', (req, res) => {
     if (!username || !password || password.length < 4) {
         return res.status(400).json({ error: 'Username and a password (min 4 chars) are required' });
     }
+
     db.get("SELECT COUNT(*) as count FROM users", async (err, row) => {
-        if (err) {
-            return res.status(500).json({ error: 'Database error checking users' });
-        }
+        if (err) return res.status(500).json({ error: 'Database error' });
         const hasUsers = row.count > 0;
         if (hasUsers && !req.session.userId) {
             return res.status(403).json({ error: 'Only an admin can create new users.' });
         }
+
         try {
             const hashedPassword = await bcrypt.hash(password, 10);
             db.run("INSERT INTO users (username, password) VALUES (?, ?)", [username, hashedPassword], function(err) {
@@ -461,10 +605,11 @@ app.post('/api/auth/login', (req, res) => {
     if (!username || !password) {
         return res.status(400).json({ error: 'Username and password are required' });
     }
+
     db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
-        if (err || !user) {
-            return res.status(401).json({ error: 'Invalid username or password' });
-        }
+        if (err) return res.status(500).json({ error: 'Database error' });
+        if (!user) return res.status(401).json({ error: 'Invalid username or password' });
+
         try {
             const isMatch = await bcrypt.compare(password, user.password);
             if (isMatch) {
@@ -482,20 +627,17 @@ app.post('/api/auth/login', (req, res) => {
 
 app.post('/api/auth/logout', (req, res) => {
     req.session.destroy((err) => {
-        if (err) {
-            return res.status(500).json({ error: 'Failed to log out' });
-        }
+        if (err) return res.status(500).json({ error: 'Failed to log out' });
         res.clearCookie('connect.sid');
         res.json({ message: 'Logout successful' });
     });
 });
 
-// --- User Management API (Unchanged) ---
+// --- User Management API Endpoints (Protected) ---
+
 app.get('/api/users', isAuthenticated, (req, res) => {
     db.all("SELECT id, username FROM users ORDER BY username", (err, rows) => {
-        if (err) {
-            return res.status(500).json({ error: 'Database error fetching users' });
-        }
+        if (err) return res.status(500).json({ error: 'Database error' });
         const otherUsers = rows.filter(u => u.id !== req.session.userId);
         res.json(otherUsers);
     });
@@ -507,35 +649,19 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
          return res.status(400).json({ error: 'You cannot delete yourself.' });
     }
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-        if (err || row.count <= 1) {
+        if (err) return res.status(500).json({ error: 'Database error' });
+        if (row.count <= 1) {
             return res.status(400).json({ error: 'Cannot delete the last user.' });
         }
         db.run("DELETE FROM users WHERE id = ?", [userIdToDelete], function(err) {
-            if (err || this.changes === 0) {
-                return res.status(500).json({ error: 'Failed to delete user' });
-            }
-            res.json({ message: 'User deleted successfully' });
+            if (err) return res.status(500).json({ error: 'Failed to delete user' });
+            if (this.changes === 0) return res.status(404).json({ error: 'User not found' });
+            res.json({ message: 'User deleted' });
         });
     });
 });
 
-// --- NEW: Settings API Endpoints ---
-app.get('/api/settings', isAuthenticated, (req, res) => {
-    res.json(getSettings());
-});
-
-app.post('/api/settings', isAuthenticated, (req, res) => {
-    const newSettings = req.body;
-    // Basic validation
-    if (!newSettings || !newSettings.buffer || !newSettings.profiles || !newSettings.activeProfileId) {
-        return res.status(400).json({ error: 'Invalid settings object.' });
-    }
-    saveSettings(newSettings);
-    res.json(newSettings);
-});
-
-
-// --- Stream API Endpoints (MODIFIED) ---
+// --- Stream API Endpoints (NOW MODIFIED) ---
 
 app.post('/api/start', isAuthenticated, (req, res) => {
     const { url } = req.body;
@@ -543,81 +669,76 @@ app.post('/api/start', isAuthenticated, (req, res) => {
         return res.status(400).json({ error: 'Missing "url" in request body' });
     }
 
-    // Stop any previously running stream/buffer first
-    stopAllStreams();
+    // Clear old logs and blocklist
+    try {
+        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
+        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
+        console.log('Cleared HLS log and blocklist for new stream.');
+        reloadNginx();
+    } catch (writeErr) {
+        console.error('Failed to clear logs or blocklist:', writeErr);
+    }
 
     try {
-        const settings = getSettings();
-        const activeProfile = settings.profiles.find(p => p.id === settings.activeProfileId) || settings.profiles.find(p => p.isDefault);
-
-        if (!activeProfile) {
-            console.error('FATAL: No active or default profile found. Cannot start stream.');
-            return res.status(500).json({ error: 'No stream profile configured.' });
-        }
-
-        if (settings.buffer.enabled) {
-            // IDEA 1: Start with Pre-fetch Buffer
-            console.log('[Stream Start] Using Pre-fetch Buffer mode.');
-            bufferManager = new BufferManager(url, settings.buffer.delaySeconds);
-            bufferManager.start();
-            
-            // Give the buffer a moment to create the initial playlist
-            setTimeout(() => {
-                const localPlaylistUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
-                spawnFfmpeg(localPlaylistUrl, activeProfile.command);
-            }, 3000); // Wait 3s for first segments to likely be ready
-
-        } else {
-            // Start directly from the source URL
-            console.log('[Stream Start] Using Direct mode.');
-            spawnFfmpeg(url, activeProfile.command);
-        }
-        
-        currentStreamUrl = url; // Store the original URL for the UI
-        res.json({ message: 'Stream started successfully' });
-
+        // --- MODIFIED ---
+        // We no longer wait for startStream, as it's now async and has a buffer warmup.
+        // We start it and return success immediately. The UI will show loading.
+        startStream(url); 
+        res.json({ message: 'Stream process initiated successfully' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to start stream', details: error.message });
     }
 });
 
 app.post('/api/stop', isAuthenticated, (req, res) => {
-    stopAllStreams();
+    console.log('Stopping stream via API request...');
+    stopAllStreamProcesses(); // Use our new global stop function
+
+    try {
+        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
+        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
+        console.log('Cleared HLS log and blocklist on stream stop.');
+        reloadNginx();
+    } catch (writeErr) {
+        console.error('Failed to clear logs or blocklist:', writeErr);
+    }
+    
     res.json({ message: 'Stream stopped' });
 });
 
 app.get('/api/status', isAuthenticated, (req, res) => {
     res.json({ 
-        running: (ffmpegProcess !== null),
+        running: (ffmpegProcess !== null || bufferManager !== null), // Stream is "running" if buffer or ffmpeg is active
         url: currentStreamUrl 
     });
 });
 
-// --- Viewer & Termination API (Unchanged) ---
 app.get('/api/viewers', isAuthenticated, (req, res) => {
-    if (!ffmpegProcess) {
-        return res.json([]); 
+    if (ffmpegProcess === null) {
+        return res.json([]); // No stream running, no viewers
     }
     let blockedIps = new Set();
     try {
-        const blocklistLines = fs.readFileSync(BLOCKLIST_PATH, 'utf8').split('\n');
-        for (const line of blocklistLines) {
+        const blocklistData = fs.readFileSync(BLOCKLIST_PATH, 'utf8');
+        blocklistData.split('\n').forEach(line => {
             if (line.startsWith('deny ')) {
                 blockedIps.add(line.substring(5, line.length - 1));
             }
-        }
+        });
     } catch (readErr) {
-        // Log not existing is fine
+        console.error('Failed to read blocklist', readErr);
     }
 
     fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
         if (err) {
+            console.error('Failed to read HLS log:', err);
             return res.status(500).json({ error: 'Failed to read viewer log' });
         }
+
         const lines = data.split('\n').filter(line => line.trim() !== '');
         const viewers = new Map();
         const now = Date.now();
-        const logRegex = /([\d\.:a-f]+) - \[([^\]]+)\]/; 
+        const logRegex = /([\d\.:a-f]+) - \[([^\]]+)\]/;
 
         for (const line of lines) {
             const match = line.match(logRegex);
@@ -626,14 +747,16 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
             const ip = match[1];
             const timestampStr = match[2].replace(/\//g, ' ').replace(':', ' ');
             const timestamp = Date.parse(timestampStr);
-            if (isNaN(timestamp)) continue;
 
+            if (isNaN(timestamp)) continue;
+            
             const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp, isBlocked: blockedIps.has(ip) };
             if (timestamp > viewer.lastSeen) viewer.lastSeen = timestamp;
             if (timestamp < viewer.firstSeen) viewer.firstSeen = timestamp;
             viewer.isBlocked = blockedIps.has(ip); 
             viewers.set(ip, viewer);
         }
+
         const activeViewers = Array.from(viewers.values()).filter(v => (now - v.lastSeen) < VIEWER_TIMEOUT_MS);
         activeViewers.sort((a, b) => b.lastSeen - a.lastSeen);
         res.json(activeViewers);
@@ -643,29 +766,25 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
 app.post('/api/terminate', isAuthenticated, (req, res) => {
     const { ip } = req.body;
     if (!ip) {
-        return res.status(400).json({ error: 'Missing "ip"' });
+        return res.status(400).json({ error: 'Missing "ip" in request body' });
     }
-    try {
-        const data = fs.readFileSync(BLOCKLIST_PATH, 'utf8');
+    fs.readFile(BLOCKLIST_PATH, 'utf8', (readErr, data) => {
+        if (readErr) return res.status(500).json({ error: 'Failed to read blocklist' });
         if (data.includes(`deny ${ip};`)) {
             return res.status(409).json({ message: `${ip} is already blocked.` });
         }
-    } catch (e) {
-        // File might not exist yet, that's fine
-    }
-
-    const blockRule = `deny ${ip};\n`;
-    fs.appendFile(BLOCKLIST_PATH, blockRule, (appendErr) => {
-        if (appendErr) {
-            return res.status(500).json({ error: 'Failed to update blocklist' });
-        }
-        console.log(`Added ${ip} to blocklist. Reloading Nginx...`);
-        reloadNginx();
-        res.json({ message: `Successfully terminated connection for ${ip}` });
+        const blockRule = `deny ${ip};\n`;
+        fs.appendFile(BLOCKLIST_PATH, blockRule, (appendErr) => {
+            if (appendErr) return res.status(500).json({ error: 'Failed to update blocklist' });
+            console.log(`Added ${ip} to blocklist. Reloading Nginx...`);
+            reloadNginx();
+            res.json({ message: `Successfully terminated connection for ${ip}` });
+        });
     });
 });
 
-// --- Root Handler ---
+
+// Serve the index.html for the root route
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -673,3 +792,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
