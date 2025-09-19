@@ -102,6 +102,7 @@ function getDefaultSettings() {
                 isDefault: true // --- FIX: Add isDefault flag
             },
             // --- NEW: MPD/DASH Profiles based on user logs ---
+            // --- UPDATED: Added reconnect flags to all MPD profiles ---
             {
                 id: 'mpd-1080p-copy',
                 name: 'MPD/DASH 1080p (Stream Copy)',
@@ -119,7 +120,7 @@ function getDefaultSettings() {
             {
                 id: 'mpd-1080p-nvenc',
                 name: 'MPD/DASH 1080p (NVIDIA NVENC)',
-                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -map 0:4 -map 0:5 -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -map 0:4 -map 0:5 -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
                 active: false,
                 isDefault: true
             }
@@ -152,6 +153,7 @@ function getSettings() {
         let needsSave = false;
         if (settings.profiles && settings.profiles.length > 0) {
             const defaultIds = ['default-cpu', 'nvidia-gpu', 'mpd-1080p-copy', 'mpd-720p-copy', 'mpd-1080p-nvenc'];
+            // --- FIX: Add reconnect flags to any existing MPD profiles that are missing them ---
             for (const profile of settings.profiles) {
                 if (defaultIds.includes(profile.id) && profile.isDefault !== true) {
                     profile.isDefault = true;
@@ -160,10 +162,16 @@ function getSettings() {
                     profile.isDefault = false;
                     needsSave = true;
                 }
+                
+                if (profile.id.startsWith('mpd-') && !profile.command.includes('-reconnect 1')) {
+                    console.log(`Upgrading profile "${profile.name}" with reconnect flags.`);
+                    profile.command = profile.command.replace('-i "{streamUrl}"', '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}"');
+                    needsSave = true;
+                }
             }
         }
         if (needsSave) {
-            console.log('Migrating settings to include isDefault flag...');
+            console.log('Migrating settings to add flags...');
             saveSettings(settings);
         }
         // --- End Migration ---
@@ -253,6 +261,7 @@ app.post('/api/settings', isAuthenticated, (req, res) => {
 let ffmpegProcess = null;
 let currentStreamUrl = "";
 let bufferManager = null; // --- NEW: Handle for the buffer manager
+let manifestRefresher = null; // --- NEW: Handle for the MPD manifest refresher ---
 const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
 const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
 const VIEWER_TIMEOUT_MS = 15 * 1000;
@@ -283,6 +292,10 @@ function cleanupHlsFiles() {
         if (fs.existsSync('/var/www/hls/local_playlist.m3u8')) {
             fs.unlinkSync('/var/www/hls/local_playlist.m3u8');
         }
+        // --- NEW: Delete local MPD manifest ---
+        if (fs.existsSync('/var/www/hls/local_manifest.mpd')) {
+            fs.unlinkSync('/var/www/hls/local_manifest.mpd');
+        }
     } catch (e) {
         console.error('[Cleanup] Error during HLS file cleanup:', e.message);
     }
@@ -295,6 +308,11 @@ function stopAllStreamProcesses() {
         bufferManager.stop();
         bufferManager = null;
     }
+    // --- NEW: Stop the manifest refresher ---
+    if (manifestRefresher) {
+        manifestRefresher.stop();
+        manifestRefresher = null;
+    }
     if (ffmpegProcess) {
         ffmpegProcess.kill('SIGKILL');
         ffmpegProcess = null;
@@ -305,7 +323,90 @@ function stopAllStreamProcesses() {
 
 
 // ================================================================
-// --- NEW: PRE-FETCH BUFFER MANAGER (IDEA 1) ---
+// --- NEW: MANIFEST REFRESHER (FOR .MPD STREAMS) ---
+// ================================================================
+
+class ManifestRefresher {
+    constructor(sourceUrl, userAgent) {
+        this.sourceUrl = sourceUrl;
+        this.userAgent = userAgent;
+        this.localManifestPath = path.join('/var/www/hls', 'local_manifest.mpd');
+        this.refreshIntervalMs = 20 * 1000; // Refresh every 20 seconds
+        this.intervalId = null;
+        this.stopFlag = false;
+        console.log(`[Refresher] Manifest Refresher started. Will refresh every ${this.refreshIntervalMs / 1000}s.`);
+    }
+
+    async refreshManifest() {
+        if (this.stopFlag) return;
+        console.log('[Refresher] Fetching fresh manifest...');
+        try {
+            const response = await axios.get(this.sourceUrl, {
+                timeout: 5000,
+                headers: { 'User-Agent': this.userAgent }
+            });
+            
+            // --- NEW: Rewrite manifest to use absolute segment URLs ---
+            // This is crucial. The original manifest has relative URLs.
+            // We must rewrite them to be absolute so FFmpeg knows where to get them.
+            const manifestData = response.data;
+            const baseUrl = this.sourceUrl.substring(0, this.sourceUrl.lastIndexOf('/') + 1);
+            
+            // This regex finds <BaseURL> tags and replaces/adds them.
+            // It also finds SegmentTemplate media attributes and prepends the base URL.
+            let rewrittenData = manifestData
+                .replace(/<BaseURL>.*<\/BaseURL>/g, `<BaseURL>${baseUrl}</BaseURL>`) // Replace existing BaseURL
+                .replace(/<SegmentTemplate(.*?)media="([^"]*?)"/g, `<SegmentTemplate$1media="${baseUrl}$2"`); // Fix segment templates
+
+            // If no BaseURL was present, add one at the top.
+            if (!rewrittenData.includes('<BaseURL>')) {
+                 rewrittenData = rewrittenData.replace(/<Period>/, `<Period>\n<BaseURL>${baseUrl}</BaseURL>`);
+            }
+
+            fs.writeFileSync(this.localManifestPath, rewrittenData);
+            console.log('[Refresher] Fresh manifest saved successfully.');
+            
+            return this.localManifestPath;
+
+        } catch (error) {
+            console.error('[Refresher] Error fetching source manifest:', error.message);
+            // Don't stop, just retry on the next interval
+        }
+    }
+
+    async start() {
+        // Do the first fetch immediately and wait for it
+        try {
+            await this.refreshManifest();
+            // Now start the timer for subsequent refreshes
+            this.intervalId = setInterval(() => this.refreshManifest(), this.refreshIntervalMs);
+            return this.localManifestPath;
+        } catch (e) {
+            console.error('[Refresher] CRITICAL: Failed first manifest fetch. Aborting stream start.');
+            throw e; // Throw error to stop the stream from starting
+        }
+    }
+
+    stop() {
+        this.stopFlag = true;
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+        }
+        console.log('[Refresher] Manifest Refresher stopped.');
+        // Clean up the local manifest file
+        try {
+            if (fs.existsSync(this.localManifestPath)) {
+                fs.unlinkSync(this.localManifestPath);
+            }
+        } catch (e) {
+            console.error('[Refresher] Failed to delete local manifest on stop:', e);
+        }
+    }
+}
+
+
+// ================================================================
+// --- PRE-FETCH BUFFER MANAGER (FOR .M3U8 STREAMS) ---
 // ================================================================
 
 class BufferManager {
@@ -533,54 +634,58 @@ async function startStream(sourceUrl) {
     console.log(`[Stream Start] Starting stream from: ${sourceUrl}`);
     const settings = getSettings();
     const activeProfile = getActiveProfile();
+    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     let streamInputUrl = sourceUrl;
     const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8'); // Check if we are restarting ourself
 
-    // --- FIX: BUG #3 - Check for MPD and force direct mode ---
-    let forceDirect = false;
-    if (sourceUrl.endsWith('.mpd') || sourceUrl.includes('.mpd?')) {
-        console.warn('[Stream Start] MPD (DASH) stream detected. Buffer only supports HLS (.m3u8). Forcing Direct Stream mode.');
-        forceDirect = true;
-    }
+    // --- NEW LOGIC: Detect MPD/DASH stream and use Manifest Refresher ---
+    const isMpdStream = sourceUrl.endsWith('.mpd') || sourceUrl.includes('.mpd?');
+    
+    if (isMpdStream && !isLocalPlaylist) {
+        console.log('[Stream Start] MPD (DASH) stream detected. Using Manifest Refresher.');
+        try {
+            manifestRefresher = new ManifestRefresher(sourceUrl, userAgent);
+            const localManifestPath = await manifestRefresher.start(); // Wait for the first fetch
+            
+            // Point FFmpeg to the locally-served, stable manifest file
+            streamInputUrl = `http://127.0.0.1:8994/${path.basename(localManifestPath)}`;
+            console.log(`[Stream Start] Manifest Refresher is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
-    // --- IDEA 1 LOGIC (Now with MPD check) ---
-    if (settings.buffer.enabled && !isLocalPlaylist && !forceDirect) {
-        console.log('[Stream Start] Using Pre-fetch Buffer mode.');
+        } catch (error) {
+            console.error("[Stream Start] CRITICAL: Manifest Refresher failed to initialize:", error.message);
+            stopAllStreamProcesses();
+            return; // Stop here
+        }
+    
+    // --- ORIGINAL HLS BUFFER LOGIC ---
+    } else if (settings.buffer.enabled && !isLocalPlaylist && !isMpdStream) {
+        console.log('[Stream Start] HLS stream detected. Using Pre-fetch Buffer mode.');
         try {
             bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
             // --- RACE CONDITION FIX ---
             const { localPlaylistPath } = await bufferManager.start();
             
-            streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
+            streamInputUrl = `http://127.0.0.1:8994/${path.basename(localPlaylistPath)}`;
             console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
-            // --- FIX: BUG #1 - Remove crashing line ---
-            // The line below was causing the crash. It is now removed.
-            // logStreamMessage(`Buffer failed: ${error.message}`, true); 
             stopAllStreamProcesses(); 
             return;
         }
     } else if (isLocalPlaylist) {
-        console.log('[Stream Start] Restarting FFmpeg against existing buffer.');
+        console.log('[Stream Start] Restarting FFmpeg against existing local playlist.');
     } else {
-        if(forceDirect) {
-            console.log('[Stream Start] Using Forced Direct Stream mode (MPD detected).');
-        } else {
-            console.log('[Stream Start] Using Direct Stream mode (Buffer disabled in settings).');
-        }
+        console.log('[Stream Start] Using Direct Stream mode (Buffer disabled or unsupported stream type).');
     }
 
     // --- IDEA 2 LOGIC ---
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-    
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl)
         .replace(/{userAgent}/g, userAgent);
 
-    // --- NEW: MPD/DASH Warning ---
-    if (forceDirect && !commandWithPlaceholders.includes('-map')) {
+    // --- NEW: MPD/DASH Warning (still relevant) ---
+    if (isMpdStream && !commandWithPlaceholders.includes('-map')) {
         console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
         console.warn('[FFmpeg] WARNING: You are streaming an MPD (DASH) source without a "-map" flag.');
         console.warn('[FFmpeg] This will likely fail by grabbing the lowest quality stream or exiting with an error.');
@@ -611,11 +716,13 @@ async function startStream(sourceUrl) {
     ffmpegProcess.on('close', (code) => {
         console.log(`[ffmpeg] process exited with code ${code}`);
         let safeToStop = true; // Flag to prevent recursion
+        
+        // --- MODIFIED: Check for buffer OR manifest refresher ---
         if (code !== 0 && code !== 255) { // 255 is normal kill
-            if (bufferManager && bufferManager.stopFlag === false) {
-                console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
-                safeToStop = false; // Don't stop buffer, we are restarting
-                startStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
+            if ((bufferManager && !bufferManager.stopFlag) || (manifestRefresher && !manifestRefresher.stopFlag)) {
+                console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against local playlist/manifest...');
+                safeToStop = false; // Don't stop helpers, we are restarting
+                startStream(streamInputUrl); // Pass the LOCAL URL to restart
             }
         }
         
@@ -733,7 +840,7 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
          return res.status(400).json({ error: 'You cannot delete yourself.' });
     }
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-        if (err) return res.status(500).json({ error: 'Database error' });
+        if (err) return res.status(5D0).json({ error: 'Database error' });
         if (row.count <= 1) {
             return res.status(400).json({ error: 'Cannot delete the last user.' });
         }
@@ -792,14 +899,14 @@ app.post('/api/stop', isAuthenticated, (req, res) => {
 
 app.get('/api/status', isAuthenticated, (req, res) => {
     res.json({ 
-        running: (ffmpegProcess !== null || bufferManager !== null), // Stream is "running" if buffer or ffmpeg is active
+        running: (ffmpegProcess !== null || bufferManager !== null || manifestRefresher !== null), // Stream is "running" if any helper is active
         url: currentStreamUrl 
     });
 });
 
 app.get('/api/viewers', isAuthenticated, (req, res) => {
-    // MODIFIED: Check buffer OR ffmpeg process
-    if (ffmpegProcess === null && bufferManager === null) {
+    // MODIFIED: Check buffer OR ffmpeg process OR manifest refresher
+    if (ffmpegProcess === null && bufferManager === null && manifestRefresher === null) {
         return res.json([]); // No stream running, no viewers
     }
     let blockedIps = new Set();
