@@ -102,13 +102,32 @@ function startStream(streamUrl) {
 
     console.log(`Starting stream from: ${streamUrl}`);
     
+    // --- MODIFIED FFMPEG COMMAND ---
+    // This command now re-encodes for maximum compatibility and low CPU.
     const args = [
+        // --- Input Flags (Robustness) ---
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
+        '-fflags', '+discardcorrupt', // Discard corrupted packets from source
+        '-err_detect', 'ignore_err',  // Ignore errors in the source and try to continue
         '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        
+        // --- Input Source ---
         '-i', streamUrl,
-        '-c', 'copy', 
+        
+        // --- Video Re-encoding (The Fix) ---
+        '-c:v', 'libx264',       // Re-encode video using x264
+        '-preset', 'ultrafast',  // <--- KEY: Use lowest CPU preset
+        '-tune', 'zerolatency',  // Optimize for live streaming
+        '-pix_fmt', 'yuv420p',   // Standard pixel format for compatibility
+        
+        // --- Audio Re-encoding (The Fix) ---
+        '-c:a', 'aac',           // Re-encode audio to AAC
+        '-b:a', '128k',          // Standard audio bitrate
+        '-ar', '44100',          // Standard audio sample rate (common for HLS)
+        
+        // --- HLS Output ---
         '-f', 'hls',
         '-hls_time', '4',
         '-hls_list_size', '10',
@@ -116,6 +135,7 @@ function startStream(streamUrl) {
         '-hls_segment_filename', '/var/www/hls/segment_%03d.ts',
         '/var/www/hls/live.m3u8'
     ];
+    // --- END OF MODIFIED COMMAND ---
 
     ffmpegProcess = spawn('ffmpeg', args);
     currentStreamUrl = streamUrl;
