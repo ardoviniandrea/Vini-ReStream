@@ -698,6 +698,18 @@ async function startStream(sourceUrl) {
         console.log('[Stream Start] Using Direct Stream mode (Buffer disabled or unsupported stream type).');
     }
 
+    // --- *** NEW: RACE CONDITION FIX *** ---
+    // We must wait ~1 second *after* saving the local manifest/playlist
+    // to give Nginx time to see the file on the filesystem.
+    // Otherwise, FFmpeg starts too fast and gets a 404.
+    const needsDelay = isMpdStream || (settings.buffer.enabled && !isRestart && !isMpdStream);
+    if (needsDelay) {
+        console.log('[Stream Start] Waiting 1 second for Nginx to see local file...');
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 1-second delay
+        console.log('[Stream Start] Delay complete. Starting FFmpeg.');
+    }
+    // --- *** END OF FIX *** ---
+
     // --- IDEA 2 LOGIC ---
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl) // Use the (potentially local) URL for FFmpeg
@@ -1006,3 +1018,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
