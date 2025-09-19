@@ -304,7 +304,8 @@ app.post('/api/auth/login', (req, res) => {
 app.post('/api/auth/logout', (req, res) => {
     req.session.destroy((err) => {
         if (err) {
-            return res.status(5m0).json({ error: 'Failed to log out' });
+            // --- THIS IS THE FIX ---
+            return res.status(500).json({ error: 'Failed to log out' });
         }
         res.clearCookie('connect.sid'); // Clear the session cookie
         res.json({ message: 'Logout successful' });
