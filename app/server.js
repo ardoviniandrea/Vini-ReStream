@@ -86,20 +86,42 @@ const isAuthenticated = (req, res, next) => {
 
 function getDefaultSettings() {
     return {
-        // --- MODIFIED: Renamed 'active' to 'activeProfileId' to match client
-        activeProfileId: 'default-cpu', 
         profiles: [
             {
                 id: 'default-cpu',
-                name: 'Default (CPU Stream Copy)',
+                name: 'Default (CPU Stream Copy - HLS Only)', // Renamed for clarity
                 command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                isDefault: true // --- NEW: Flag for default profiles
+                active: true,
+                isDefault: true // --- FIX: Add isDefault flag
             },
             {
                 id: 'nvidia-gpu',
-                name: 'NVIDIA (NVENC Re-encode)',
-                command: '-hwaccel nvdec -user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                isDefault: true // --- NEW: Flag for default profiles
+                name: 'NVIDIA (NVENC Re-encode - HLS Only)', // Renamed for clarity
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                active: false,
+                isDefault: true // --- FIX: Add isDefault flag
+            },
+            // --- NEW: MPD/DASH Profiles based on user logs ---
+            {
+                id: 'mpd-1080p-copy',
+                name: 'MPD/DASH 1080p (Stream Copy)',
+                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -map 0:4 -map 0:5 -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                active: false,
+                isDefault: true
+            },
+            {
+                id: 'mpd-720p-copy',
+                name: 'MPD/DASH 720p (Stream Copy)',
+                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -map 0:3 -map 0:5 -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                active: false,
+                isDefault: true
+            },
+            {
+                id: 'mpd-1080p-nvenc',
+                name: 'MPD/DASH 1080p (NVIDIA NVENC)',
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -map 0:4 -map 0:5 -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                active: false,
+                isDefault: true
             }
         ],
         buffer: {
@@ -108,6 +130,7 @@ function getDefaultSettings() {
         }
     };
 }
+
 
 function getSettings() {
     if (!fs.existsSync(SETTINGS_PATH)) {
@@ -125,40 +148,33 @@ function getSettings() {
         const settingsData = fs.readFileSync(SETTINGS_PATH, 'utf8');
         let settings = JSON.parse(settingsData);
 
-        // --- MIGRATION STEP ---
-        // This handles old settings files that used 'profile.active'
-        if (settings.profiles && !settings.activeProfileId) {
-            console.log('Migrating old settings format...');
-            const oldActive = settings.profiles.find(p => p.active === true);
-            if (oldActive) {
-                settings.activeProfileId = oldActive.id;
-            } else {
-                settings.activeProfileId = 'default-cpu';
-            }
-            // Remove the old 'active' flag
-            settings.profiles.forEach(p => delete p.active);
-            // Add 'isDefault' flag
-            const defaults = getDefaultSettings();
-            settings.profiles.forEach(p => {
-                const defaultProfile = defaults.profiles.find(dp => dp.id === p.id);
-                if (defaultProfile) {
-                    p.isDefault = true;
+        // --- NEW: Migration logic to add isDefault flag to old profiles ---
+        let needsSave = false;
+        if (settings.profiles && settings.profiles.length > 0) {
+            const defaultIds = ['default-cpu', 'nvidia-gpu', 'mpd-1080p-copy', 'mpd-720p-copy', 'mpd-1080p-nvenc'];
+            for (const profile of settings.profiles) {
+                if (defaultIds.includes(profile.id) && profile.isDefault !== true) {
+                    profile.isDefault = true;
+                    needsSave = true;
+                } else if (!defaultIds.includes(profile.id) && profile.isDefault !== false) {
+                    profile.isDefault = false;
+                    needsSave = true;
                 }
-            });
-            // Save the migrated settings
-            saveSettings(settings);
-            console.log('Migration complete.');
+            }
         }
+        if (needsSave) {
+            console.log('Migrating settings to include isDefault flag...');
+            saveSettings(settings);
+        }
+        // --- End Migration ---
 
         return settings;
     } catch (e) {
         console.error("Failed to parse settings.json, returning defaults:", e);
-        // If file is corrupt, overwrite with defaults
-        const defaults = getDefaultSettings();
-        saveSettings(defaults);
-        return defaults;
+        return getDefaultSettings(); // Return defaults if parsing fails
     }
 }
+
 
 function saveSettings(settings) {
     try {
@@ -173,9 +189,19 @@ function saveSettings(settings) {
 
 function getActiveProfile() {
     const settings = getSettings();
-    // Find the profile matching the activeProfileId, or fall back to the first profile
-    return settings.profiles.find(p => p.id === settings.activeProfileId) || settings.profiles[0];
+    // --- MODIFIED: Find active profile by ID from settings ---
+    let activeProfile = settings.profiles.find(p => p.id === settings.activeProfileId);
+    if (!activeProfile) {
+        // Fallback if activeId is invalid or not set
+        activeProfile = settings.profiles.find(p => p.active === true);
+    }
+    if (!activeProfile) {
+        // Fallback to first profile
+        activeProfile = settings.profiles[0];
+    }
+    return activeProfile || getDefaultSettings().profiles[0]; // Absolute fallback
 }
+
 
 // --- NEW: Settings & Profiles API Endpoints (Protected) ---
 
@@ -185,33 +211,39 @@ app.get('/api/settings', isAuthenticated, (req, res) => {
 
 app.post('/api/settings', isAuthenticated, (req, res) => {
     const newSettings = req.body;
-
-    if (!newSettings || !newSettings.profiles || !newSettings.buffer || !newSettings.activeProfileId) {
+    if (!newSettings || !newSettings.profiles || !newSettings.buffer) {
         return res.status(400).json({ error: 'Invalid settings object.' });
     }
-    
-    // --- FIX: BUG A ---
-    // The client sends the *entire* state, including the 'activeProfileId'.
-    // We just need to validate that the ID it sent actually exists in the profiles list.
-    const activeProfileExists = newSettings.profiles.some(p => p.id === newSettings.activeProfileId);
-    
-    // If the active ID doesn't exist (e.g., it was deleted), default to the first profile
-    if (!activeProfileExists && newSettings.profiles.length > 0) {
-        newSettings.activeProfileId = newSettings.profiles[0].id;
-    } else if (newSettings.profiles.length === 0) {
-        // This should never happen, but as a safeguard
-        return res.status(500).json({ error: 'Cannot save with no profiles.' });
-    }
 
-    // Now, save the validated settings
+    // --- MODIFIED: We now save the *ID* of the active profile ---
+    // The 'active' boolean on the profile itself is deprecated, but we keep
+    // it for one last check to find the ID.
+    let activeId = newSettings.activeProfileId;
+    if (!activeId) {
+        const activeProfile = newSettings.profiles.find(p => p.active === true);
+        activeId = activeProfile ? activeProfile.id : newSettings.profiles[0]?.id;
+    }
+    
+    // Ensure the activeId is valid
+    if (!newSettings.profiles.find(p => p.id === activeId)) {
+        activeId = newSettings.profiles[0]?.id; // Default to first if not found
+    }
+    
+    newSettings.activeProfileId = activeId;
+    
+    // Clean up old 'active' flags (they are no longer the source of truth)
+    newSettings.profiles.forEach(p => {
+        p.active = (p.id === activeId);
+    });
+    
     if (saveSettings(newSettings)) {
-        // --- FIX: BUG B ---
-        // Return the *entire* saved object, not just a message.
+        // --- FIX: Return the full settings object so the UI stays in sync ---
         res.json(newSettings);
     } else {
         res.status(500).json({ error: 'Failed to save settings to disk.' });
     }
 });
+
 
 
 // ================================================================
@@ -405,8 +437,7 @@ class BufferManager {
         // Use the full URI queue to download, but the original segments for filenames
         for (let i = 0; i < this.segmentQueue.length; i++) {
             const segmentUrl = this.segmentQueue[i];
-            // --- FIX: Handle query params in filenames ---
-            const filename = originalSegments[i].uri.split('?')[0].split('/').pop();
+            const filename = originalSegments[i].uri.split('/').pop();
             
             if (this.stopFlag) return;
             if (!this.downloadedSegments.has(filename)) {
@@ -430,19 +461,15 @@ class BufferManager {
             }
         }
         // Clean up old segments
-        // --- FIX: Handle query params in filenames ---
-        this.cleanupOldSegments(originalSegments.map(s => s.uri.split('?')[0].split('/').pop()));
+        this.cleanupOldSegments(originalSegments.map(s => s.uri.split('/').pop()));
     }
 
     writeLocalPlaylist(playlist) {
         // This creates a new .m3u8 file that points to our locally buffered segments.
         // These segments are in /var/www/hls/buffer/
         
-        // --- FIX: Handle query params in filenames ---
-        const getFilename = (uri) => uri.split('?')[0].split('/').pop();
-
         // Filter playlist to only segments we *actually* have downloaded
-        const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(getFilename(s.uri)));
+        const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(s.uri.split('/').pop()));
 
         // We only want the *end* of the available list, up to our target buffer size
         const bufferedSegments = availableSegments.slice(-this.targetBufferSegments);
@@ -451,9 +478,11 @@ class BufferManager {
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
         
-        // --- FIX: Handle missing mediaSequence ---
-        const firstSequence = bufferedSegments[0].mediaSequence || playlist.mediaSequence || 0;
-        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${firstSequence}\n`;
+        // Find the media sequence of the *first segment we are including*
+        const firstSegmentData = playlist.segments.find(s => s.uri.split('/').pop() === bufferedSegments[0].uri.split('/').pop());
+        const mediaSequence = firstSegmentData ? firstSegmentData.mediaSequence : 0;
+
+        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}\n`;
 
         for (const segment of bufferedSegments) {
             if (segment.discontinuity) {
@@ -461,7 +490,7 @@ class BufferManager {
             }
             m3u8Content += `#EXTINF:${segment.duration.toFixed(6)},\n`;
             // Point to the *relative path* that Nginx will serve
-            m3u8Content += `buffer/${getFilename(segment.uri)}\n`; 
+            m3u8Content += `buffer/${segment.uri.split('/').pop()}\n`; 
         }
 
         try {
@@ -522,12 +551,14 @@ async function startStream(sourceUrl) {
             // --- RACE CONDITION FIX ---
             const { localPlaylistPath } = await bufferManager.start();
             
-            // --- FIX: Use 127.0.0.1 for consistency ---
-            streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8?t=${Date.now()}`; // Add cache buster
+            streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
             console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
+            // --- FIX: BUG #1 - Remove crashing line ---
+            // The line below was causing the crash. It is now removed.
+            // logStreamMessage(`Buffer failed: ${error.message}`, true); 
             stopAllStreamProcesses(); 
             return;
         }
@@ -544,15 +575,18 @@ async function startStream(sourceUrl) {
     // --- IDEA 2 LOGIC ---
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     
-    if (!activeProfile || !activeProfile.command) {
-        console.error("[FFmpeg] FATAL ERROR: No active profile found or profile is missing command. Aborting.");
-        stopAllStreamProcesses();
-        return;
-    }
-
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl)
         .replace(/{userAgent}/g, userAgent);
+
+    // --- NEW: MPD/DASH Warning ---
+    if (forceDirect && !commandWithPlaceholders.includes('-map')) {
+        console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+        console.warn('[FFmpeg] WARNING: You are streaming an MPD (DASH) source without a "-map" flag.');
+        console.warn('[FFmpeg] This will likely fail by grabbing the lowest quality stream or exiting with an error.');
+        console.warn('[FFmpeg] Please use a profile that maps specific video/audio streams (e.g., -map 0:4 -map 0:5).');
+        console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+    }
 
     // --- FIX: BUG #2 - Use quote-safe parser instead of .split(' ') ---
     const args = (commandWithPlaceholders.match(/(?:[^\s"]+|"[^"]*")+/g) || [])
@@ -569,13 +603,7 @@ async function startStream(sourceUrl) {
 
     ffmpegProcess.stderr.on('data', (data) => {
         const stderrStr = data.toString();
-        // Filter out noisy progress messages
-        if (!stderrStr.startsWith('frame=') && 
-            !stderrStr.startsWith('size=') && 
-            !stderrStr.startsWith('Opening') && 
-            !stderrStr.includes('dropping overlapping') &&
-            !stderrStr.includes('Past duration') &&
-            !stderrStr.includes('Last message repeated')) {
+        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening') && !stderrStr.includes('dropping overlapping extension')) {
              console.error(`[ffmpeg stderr]: ${stderrStr.trim()}`);
         }
     });
@@ -587,8 +615,7 @@ async function startStream(sourceUrl) {
             if (bufferManager && bufferManager.stopFlag === false) {
                 console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
                 safeToStop = false; // Don't stop buffer, we are restarting
-                // --- FIX: Pass the LOCAL playlist URL to restart ---
-                startStream(`http://127.0.0.1:8994/local_playlist.m3u8?t=${Date.now()}`); 
+                startStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
             }
         }
         
@@ -706,7 +733,7 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
          return res.status(400).json({ error: 'You cannot delete yourself.' });
     }
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-        if (err) return res.status(500).json({ error: 'Database error' });
+        if (err) return res.status(5G00).json({ error: 'Database error' });
         if (row.count <= 1) {
             return res.status(400).json({ error: 'Cannot delete the last user.' });
         }
@@ -796,28 +823,23 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
         const lines = data.split('\n').filter(line => line.trim() !== '');
         const viewers = new Map();
         const now = Date.now();
-        const logRegex = /([\d\.:a-fA-F]+) - \[([^\]]+)\]/; // Support IPv6
+        const logRegex = /([\d\.:a-f]+) - \[([^\]]+)\]/;
 
         for (const line of lines) {
             const match = line.match(logRegex);
             if (!match) continue;
 
             const ip = match[1];
-            // --- FIX: More robust date parsing for Nginx log format ---
-            // Nginx format: 19/Sep/2025:11:30:00 +0200
             const timestampStr = match[2].replace(/\//g, ' ').replace(':', ' ');
-            try {
-                const timestamp = Date.parse(timestampStr);
-                if (isNaN(timestamp)) continue;
-                
-                const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp, isBlocked: blockedIps.has(ip) };
-                if (timestamp > viewer.lastSeen) viewer.lastSeen = timestamp;
-                if (timestamp < viewer.firstSeen) viewer.firstSeen = timestamp;
-                viewer.isBlocked = blockedIps.has(ip); 
-                viewers.set(ip, viewer);
-            } catch (dateErr) {
-                // Ignore invalid date lines
-            }
+            const timestamp = Date.parse(timestampStr);
+
+            if (isNaN(timestamp)) continue;
+            
+            const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp, isBlocked: blockedIps.has(ip) };
+            if (timestamp > viewer.lastSeen) viewer.lastSeen = timestamp;
+            if (timestamp < viewer.firstSeen) viewer.firstSeen = timestamp;
+            viewer.isBlocked = blockedIps.has(ip); 
+            viewers.set(ip, viewer);
         }
 
         const activeViewers = Array.from(viewers.values()).filter(v => (now - v.lastSeen) < VIEWER_TIMEOUT_MS);
