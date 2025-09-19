@@ -81,7 +81,7 @@ const isAuthenticated = (req, res, next) => {
 };
 
 // ================================================================
-// --- NEW: SETTINGS MANAGEMENT ---
+// --- SETTINGS MANAGEMENT ---
 // ================================================================
 
 function getDefaultSettings() {
@@ -339,7 +339,10 @@ class ManifestRefresher {
 
     async refreshManifest() {
         if (this.stopFlag) return;
-        console.log('[Refresher] Fetching fresh manifest...');
+        
+        // --- NEW: ADDED DEBUG LOGGING ---
+        console.log('[Refresher] Fetching fresh manifest from URL:', this.sourceUrl);
+
         try {
             const response = await axios.get(this.sourceUrl, {
                 timeout: 5000,
@@ -370,7 +373,9 @@ class ManifestRefresher {
 
         } catch (error) {
             console.error('[Refresher] Error fetching source manifest:', error.message);
-            // Don't stop, just retry on the next interval
+            // --- NEW: BUG FIX ---
+            // Re-throw the error so the 'start' function knows it failed
+            throw error; 
         }
     }
 
@@ -636,15 +641,28 @@ async function startStream(sourceUrl) {
     const activeProfile = getActiveProfile();
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     let streamInputUrl = sourceUrl;
-    const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8'); // Check if we are restarting ourself
+    
+    // --- NEW: Check if this is a restart attempt ---
+    // If the sourceUrl is ALREADY a local manifest, it's a restart.
+    // We must NOT use it to create a *new* refresher. We must use the *original* URL.
+    const isRestart = sourceUrl.includes('local_manifest.mpd') || sourceUrl.includes('local_playlist.m3u8');
+    
+    // If it's a restart, use the globally saved original URL.
+    // If it's a new stream, save the URL globally.
+    const urlToFetch = isRestart ? currentStreamUrl : sourceUrl;
+    if (!isRestart) {
+        currentStreamUrl = sourceUrl; // Save the original URL
+    }
+
 
     // --- NEW LOGIC: Detect MPD/DASH stream and use Manifest Refresher ---
-    const isMpdStream = sourceUrl.endsWith('.mpd') || sourceUrl.includes('.mpd?');
+    const isMpdStream = urlToFetch.endsWith('.mpd') || urlToFetch.includes('.mpd?');
     
-    if (isMpdStream && !isLocalPlaylist) {
+    if (isMpdStream) {
         console.log('[Stream Start] MPD (DASH) stream detected. Using Manifest Refresher.');
         try {
-            manifestRefresher = new ManifestRefresher(sourceUrl, userAgent);
+            // Pass the *original* Akamai URL to the refresher
+            manifestRefresher = new ManifestRefresher(urlToFetch, userAgent);
             const localManifestPath = await manifestRefresher.start(); // Wait for the first fetch
             
             // Point FFmpeg to the locally-served, stable manifest file
@@ -658,10 +676,10 @@ async function startStream(sourceUrl) {
         }
     
     // --- ORIGINAL HLS BUFFER LOGIC ---
-    } else if (settings.buffer.enabled && !isLocalPlaylist && !isMpdStream) {
+    } else if (settings.buffer.enabled && !isRestart) {
         console.log('[Stream Start] HLS stream detected. Using Pre-fetch Buffer mode.');
         try {
-            bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
+            bufferManager = new BufferManager(urlToFetch, settings.buffer.delaySeconds);
             // --- RACE CONDITION FIX ---
             const { localPlaylistPath } = await bufferManager.start();
             
@@ -673,15 +691,16 @@ async function startStream(sourceUrl) {
             stopAllStreamProcesses(); 
             return;
         }
-    } else if (isLocalPlaylist) {
-        console.log('[Stream Start] Restarting FFmpeg against existing local playlist.');
+    } else if (isRestart) {
+        console.log('[Stream Start] Restarting FFmpeg against existing local playlist/manifest.');
+        // streamInputUrl is already set to the local URL from the failed process
     } else {
         console.log('[Stream Start] Using Direct Stream mode (Buffer disabled or unsupported stream type).');
     }
 
     // --- IDEA 2 LOGIC ---
     const commandWithPlaceholders = activeProfile.command
-        .replace(/{streamUrl}/g, streamInputUrl)
+        .replace(/{streamUrl}/g, streamInputUrl) // Use the (potentially local) URL for FFmpeg
         .replace(/{userAgent}/g, userAgent);
 
     // --- NEW: MPD/DASH Warning (still relevant) ---
@@ -700,7 +719,7 @@ async function startStream(sourceUrl) {
     console.log(`[FFmpeg] Starting process with command: ffmpeg ${args.join(' ')}`);
 
     ffmpegProcess = spawn('ffmpeg', args);
-    currentStreamUrl = sourceUrl; // Store the *original* source URL
+    // currentStreamUrl is already set at the top of this function
 
     ffmpegProcess.stdout.on('data', (data) => {
         // console.log(`ffmpeg stdout: ${data}`);
@@ -720,9 +739,12 @@ async function startStream(sourceUrl) {
         // --- MODIFIED: Check for buffer OR manifest refresher ---
         if (code !== 0 && code !== 255) { // 255 is normal kill
             if ((bufferManager && !bufferManager.stopFlag) || (manifestRefresher && !manifestRefresher.stopFlag)) {
-                console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against local playlist/manifest...');
+                console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg...');
                 safeToStop = false; // Don't stop helpers, we are restarting
-                startStream(streamInputUrl); // Pass the LOCAL URL to restart
+                
+                // --- NEW: BUG FIX (THE DEATH LOOP) ---
+                // Always restart using the *original* Akamai URL, not the local one.
+                startStream(currentStreamUrl); 
             }
         }
         
