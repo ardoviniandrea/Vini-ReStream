@@ -242,7 +242,7 @@ class BufferManager {
     constructor(sourceUrl, bufferSeconds) {
         this.sourceUrl = sourceUrl;
         this.targetBufferSegments = Math.max(1, Math.floor(bufferSeconds / 4)); // Assuming avg 4s segments
-        this.bufferDir = path.join(__dirname, 'buffer');
+        this.bufferDir = path.join('/var/www/hls', 'buffer'); // <<< MODIFIED: Write directly into nginx dir
         this.localPlaylistPath = path.join('/var/www/hls', 'local_playlist.m3u8'); // Nginx serves this
         this.segmentQueue = [];    // List of segment filenames (e.g., "seg-101.ts")
         this.downloadedSegments = new Set();
@@ -260,7 +260,7 @@ class BufferManager {
             if (fs.existsSync(this.bufferDir)) {
                 fs.rmSync(this.bufferDir, { recursive: true, force: true });
             }
-            fs.mkdirSync(this.bufferDir);
+            fs.mkdirSync(this.bufferDir, { recursive: true }); // <<< MODIFIED: Added recursive
         } catch (e) {
             console.error('[Buffer] Failed to create or clean buffer directory:', e);
         }
@@ -317,16 +317,23 @@ class BufferManager {
             // Determine the base URL for segments (relative vs absolute)
             const firstSegmentUri = playlist.segments[0].uri;
             if (firstSegmentUri.startsWith('http')) {
-                this.segmentBaseUrl = new URL(firstSegmentUri).origin;
+                this.segmentBaseUrl = ''; // Segments have full URLs
             } else {
-                this.segmentBaseUrl = new URL(this.sourceUrl).origin;
+                // Segments are relative. Construct base URL from main playlist URL.
+                const urlObj = new URL(this.sourceUrl);
+                urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+                this.segmentBaseUrl = urlObj.toString();
             }
 
-            const segmentFilenames = playlist.segments.map(s => s.uri.split('/').pop());
-            this.segmentQueue = segmentFilenames; // Update the queue with the latest list
-            
+            // Get *full URIs* for segments
+            const segmentUris = playlist.segments.map(s => {
+                // If segmentBaseUrl is empty, the URI is already absolute
+                return this.segmentBaseUrl ? new URL(s.uri, this.segmentBaseUrl).href : s.uri;
+            });
+            this.segmentQueue = segmentUris; // Update queue with FULL URLs
+
             // Start downloading segments from the queue
-            this.downloadSegments();
+            this.downloadSegments(playlist.segments); // Pass original segments for filenames
             // Write the local playlist for FFmpeg to read from
             this.writeLocalPlaylist(playlist);
 
@@ -340,7 +347,7 @@ class BufferManager {
 
             // Schedule the next fetch based on segment duration
             const refreshInterval = (playlist.segments[0].duration || 4) * 1000;
-            this.timeoutId = setTimeout(() => this.fetchPlaylist(), refreshInterval);
+            this.timeoutId = setTimeout(() => this.fetchPlaylist(), refreshInterval / 2); // Refresh at half duration
 
         } catch (error) {
             console.error('[Buffer] Error fetching source playlist:', error.message);
@@ -356,12 +363,14 @@ class BufferManager {
         }
     }
 
-    async downloadSegments() {
-        // Download segments from the queue that we don't already have
-        for (const filename of this.segmentQueue) {
+    async downloadSegments(originalSegments) {
+        // Use the full URI queue to download, but the original segments for filenames
+        for (let i = 0; i < this.segmentQueue.length; i++) {
+            const segmentUrl = this.segmentQueue[i];
+            const filename = originalSegments[i].uri.split('/').pop();
+            
             if (this.stopFlag) return;
             if (!this.downloadedSegments.has(filename)) {
-                const segmentUrl = new URL(filename, this.segmentBaseUrl).href;
                 const localPath = path.join(this.bufferDir, filename);
 
                 try {
@@ -377,33 +386,18 @@ class BufferManager {
                     this.downloadedSegments.add(filename);
                 } catch (error) {
                     console.warn(`[Buffer] Failed to download segment ${filename}:`, error.message);
-                    // If a segment download fails, we break and wait for the next playlist refresh
-                    // rather than hammering a potentially dead segment.
                     break; 
                 }
             }
         }
         // Clean up old segments
-        this.cleanupOldSegments();
+        this.cleanupOldSegments(originalSegments.map(s => s.uri.split('/').pop()));
     }
 
     writeLocalPlaylist(playlist) {
-        // This creates a new .m3u8 file that points to our locally buffered segments,
-        // which are served by Nginx from /var/www/hls/buffer/ (via a symlink or direct write, let's serve them from /var/www/hls/)
-        // Actually, let's write them to /var/www/hls directly to simplify Nginx.
-        // NO - ffmpeg needs to read from our *local* folder. Nginx needs to serve *ffmpeg's output*.
-        // The /var/www/hls/local_playlist.m3u8 should point to files in /usr/src/app/buffer
-        // Wait, no. FFmpeg is *reading* this playlist. So the playlist just needs to point to the files on disk.
-        // And Nginx must serve *this playlist file* to FFmpeg (which is running as a client)
-
-        // Let's create the buffer dir INSIDE /var/www/hls to avoid all permission/serving issues.
-        // Yes, this is much simpler.
-        const nginxBufferDir = '/var/www/hls/buffer';
-        if (!fs.existsSync(nginxBufferDir)) fs.mkdirSync(nginxBufferDir);
-
-        // This path is correct, as FFmpeg will fetch it over HTTP
-        const localPlaylistPath = '/var/www/hls/local_playlist.m3u8'; 
-
+        // This creates a new .m3u8 file that points to our locally buffered segments.
+        // These segments are in /var/www/hls/buffer/
+        
         // Filter playlist to only segments we *actually* have downloaded
         const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(s.uri.split('/').pop()));
 
@@ -413,7 +407,8 @@ class BufferManager {
         if(bufferedSegments.length === 0) return; // Not ready yet
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
-        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${bufferedSegments[0].mediaSequence || playlist.mediaSequence}\n`;
+        // Use the media sequence of the *first segment we are including*
+        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${bufferedSegments[0].mediaSequence}\n`;
 
         for (const segment of bufferedSegments) {
             if (segment.discontinuity) {
@@ -424,17 +419,16 @@ class BufferManager {
             m3u8Content += `buffer/${segment.uri.split('/').pop()}\n`; 
         }
 
-        // Write the new playlist for FFmpeg to pick up
         try {
-             fs.writeFileSync(localPlaylistPath, m3u8Content);
+             fs.writeFileSync(this.localPlaylistPath, m3u8Content);
         } catch (e) {
             console.error('[Buffer] Failed to write local playlist file:', e.message);
         }
     }
 
-    cleanupOldSegments() {
+    cleanupOldSegments(currentSegmentFilenames) {
         // This logic keeps our buffer folder from growing forever
-        const segmentsToKeep = new Set(this.segmentQueue.slice(-this.targetBufferSegments * 2)); // Keep 2x buffer
+        const segmentsToKeep = new Set(currentSegmentFilenames); 
         for (const filename of this.downloadedSegments) {
             if (!segmentsToKeep.has(filename)) {
                 try {
@@ -468,43 +462,52 @@ async function startStream(sourceUrl) {
     let streamInputUrl = sourceUrl;
     const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8'); // Check if we are restarting ourself
 
-    // --- IDEA 1 LOGIC ---
-    // If buffer is enabled AND this is a NEW request (not a restart pointing at ourself), start the buffer.
-    if (settings.buffer.enabled && !isLocalPlaylist) {
+    // --- FIX: BUG #3 - Check for MPD and force direct mode ---
+    let forceDirect = false;
+    if (sourceUrl.endsWith('.mpd') || sourceUrl.includes('.mpd?')) {
+        console.warn('[Stream Start] MPD (DASH) stream detected. Buffer only supports HLS (.m3u8). Forcing Direct Stream mode.');
+        forceDirect = true;
+    }
+
+    // --- IDEA 1 LOGIC (Now with MPD check) ---
+    if (settings.buffer.enabled && !isLocalPlaylist && !forceDirect) {
         console.log('[Stream Start] Using Pre-fetch Buffer mode.');
         try {
             bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
             // --- RACE CONDITION FIX ---
-            // This now waits for the buffer manager to fetch the source, download segments,
-            // and create the first local_playlist.m3u8 file *before* ffmpeg starts.
             const { localPlaylistPath } = await bufferManager.start();
             
-            // Nginx serves on port 8994, and ffmpeg will access this as a client.
-            // This MUST be the HTTP URL, not the file system path.
             streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
             console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
-            logStreamMessage(`Buffer failed: ${error.message}`, true);
-            stopAllStreamProcesses(); // Clean up partial setup
-            return; // Do not start ffmpeg if buffer fails
+            // --- FIX: BUG #1 - Remove crashing line ---
+            // The line below was causing the crash. It is now removed.
+            // logStreamMessage(`Buffer failed: ${error.message}`, true); 
+            stopAllStreamProcesses(); 
+            return;
         }
     } else if (isLocalPlaylist) {
         console.log('[Stream Start] Restarting FFmpeg against existing buffer.');
     } else {
-        console.log('[Stream Start] Using Direct Stream mode (Buffer disabled).');
+        if(forceDirect) {
+            console.log('[Stream Start] Using Forced Direct Stream mode (MPD detected).');
+        } else {
+            console.log('[Stream Start] Using Direct Stream mode (Buffer disabled in settings).');
+        }
     }
 
     // --- IDEA 2 LOGIC ---
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     
-    // Replace placeholders in the selected command
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl)
         .replace(/{userAgent}/g, userAgent);
 
-    const args = commandWithPlaceholders.split(' ').slice(1); // Split command into args, remove 'ffmpeg'
+    // --- FIX: BUG #2 - Use quote-safe parser instead of .split(' ') ---
+    const args = (commandWithPlaceholders.match(/(?:[^\s"]+|"[^"]*")+/g) || [])
+                 .map(arg => arg.replace(/^"|"$/g, '')); // Split by space BUT respect quotes, then remove the quotes.
     
     console.log(`[FFmpeg] Starting process with command: ffmpeg ${args.join(' ')}`);
 
@@ -517,26 +520,24 @@ async function startStream(sourceUrl) {
 
     ffmpegProcess.stderr.on('data', (data) => {
         const stderrStr = data.toString();
-        // Log to console, but avoid spamming with segment/frame data
-        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening')) {
+        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening') && !stderrStr.includes('dropping overlapping extension')) {
              console.error(`[ffmpeg stderr]: ${stderrStr.trim()}`);
         }
     });
 
     ffmpegProcess.on('close', (code) => {
         console.log(`[ffmpeg] process exited with code ${code}`);
+        let safeToStop = true; // Flag to prevent recursion
         if (code !== 0 && code !== 255) { // 255 is normal kill
-            // If ffmpeg fails, and we're in buffer mode, it might be a temporary network flap.
-            // Let's try restarting ffmpeg against the same local buffer.
-            if (bufferManager && !this.stopFlag) {
+            if (bufferManager && bufferManager.stopFlag === false) {
                 console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
+                safeToStop = false; // Don't stop buffer, we are restarting
                 startStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
             }
-        } else {
-            // Normal exit, stop everything
-             if (ffmpegProcess) { // Check if it hasn't been stopped by /api/stop
-                stopAllStreamProcesses();
-             }
+        }
+        
+        if (safeToStop && ffmpegProcess) { // Check if it hasn't been stopped by /api/stop
+            stopAllStreamProcesses();
         }
     });
 
@@ -714,7 +715,8 @@ app.get('/api/status', isAuthenticated, (req, res) => {
 });
 
 app.get('/api/viewers', isAuthenticated, (req, res) => {
-    if (ffmpegProcess === null) {
+    // MODIFIED: Check buffer OR ffmpeg process
+    if (ffmpegProcess === null && bufferManager === null) {
         return res.json([]); // No stream running, no viewers
     }
     let blockedIps = new Set();
@@ -726,13 +728,13 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
             }
         });
     } catch (readErr) {
-        console.error('Failed to read blocklist', readErr);
+        // Non-fatal, just log
     }
 
     fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
         if (err) {
-            console.error('Failed to read HLS log:', err);
-            return res.status(500).json({ error: 'Failed to read viewer log' });
+            // Non-fatal, just return empty
+            return res.json([]);
         }
 
         const lines = data.split('\n').filter(line => line.trim() !== '');
