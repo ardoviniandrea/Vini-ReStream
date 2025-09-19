@@ -184,7 +184,7 @@
             <!-- URL Input -->
             <div class="mb-4">
                 <label for="stream-url" class="block text-sm font-medium text-gray-300 mb-2">Authenticated Stream Link</label>
-                <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your .m3u8 link here...">
+                <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your .m3u8 or .mpd link here...">
             </div>
 
             <!-- Action Buttons -->
@@ -284,7 +284,7 @@
             <!-- Idea 1: Pre-fetch Buffer Settings -->
             <div class="bg-gray-900 p-6 rounded-lg border border-gray-700">
                 <h3 class="text-xl font-bold text-indigo-300 mb-2">Pre-fetch Buffer (Idea 1)</h3>
-                <p class="text-sm text-gray-400 mb-4">Enable this to download stream segments in advance. This creates a delay but massively improves stability on flaky source streams and prevents skips on mobile.</p>
+                <p class="text-sm text-gray-400 mb-4">Enable this to download stream segments in advance. This creates a delay but massively improves stability on flaky source streams and prevents skips on mobile. <strong class="text-yellow-400">Note: Does not work with .mpd (DASH) streams.</strong></p>
                 <div class="space-y-4">
                     <div class="flex items-center justify-between">
                         <label for="buffer-enabled" class="font-medium text-gray-200">Enable Pre-fetch Buffer</label>
@@ -552,6 +552,8 @@
             checkStatus(); 
             // Also pre-fetch the user list for the other tab
             fetchUsers();
+            // And pre-load settings
+            loadSettingsAndProfiles();
         }
 
         function showTab(tabId) {
@@ -849,6 +851,7 @@
         function handleCopy() {
             shareLink.select();
             try {
+                // Use execCommand as a fallback for iframe/secure contexts
                 document.execCommand('copy');
                 copyFeedback.style.display = 'block';
                 setTimeout(() => { copyFeedback.style.display = 'none'; }, 2000);
@@ -1138,8 +1141,9 @@
                     // Filter the profile out of the array
                     globalSettings.profiles = globalSettings.profiles.filter(p => p.id !== selectedId);
                     
-                    // Set active profile back to the first default one
-                    globalSettings.activeProfileId = globalSettings.profiles.find(p => p.isDefault).id;
+                    // --- FIX: Robustly find the next profile to select ---
+                    const firstDefault = globalSettings.profiles.find(p => p.isDefault);
+                    globalSettings.activeProfileId = firstDefault ? firstDefault.id : (globalSettings.profiles[0] ? globalSettings.profiles[0].id : null);
                     
                     // Save the entire updated settings object
                     saveAllSettings(); // This also refreshes the select box
@@ -1163,8 +1167,12 @@
 
             if (!response.ok) {
                 // Pass other errors (like 400, 404, 500) up the chain
-                const data = await response.json();
-                throw new Error(data.error || `Server error: ${response.status}`);
+                try {
+                    const data = await response.json();
+                    throw new Error(data.error || `Server error: ${response.status}`);
+                } catch (e) {
+                     throw new Error(`Server error: ${response.status} - ${response.statusText}`);
+                }
             }
 
             return response; // Return the successful response
