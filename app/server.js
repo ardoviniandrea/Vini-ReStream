@@ -933,6 +933,7 @@ app.get('/stream/live.m3u8', async (req, res) => {
 
     try {
         const response = await axios.get(currentVodUrl, {
+            // --- FIX: Add User-Agent header ---
             headers: { 'User-Agent': USER_AGENT }
         });
 
@@ -956,10 +957,25 @@ app.get('/stream/live.m3u8', async (req, res) => {
             }
             
             // Prepend our proxy path to the segment/playlist URL
-            return `http://${req.headers.host}/stream/${line}`;
+            // --- FIX: Use relative path to our own server ---
+            return `${line.trim()}`;
         });
 
-        const rewrittenPlaylist = rewrittenLines.join('\n');
+        // --- FIX: Rewrite logic was wrong. ---
+        // We need to rewrite lines that are NOT tags and NOT empty.
+        // The rewrite needs to prepend our proxy path.
+        const finalLines = playlistData.split('\n').map(line => {
+            const trimmedLine = line.trim();
+            if (trimmedLine.length === 0 || trimmedLine.startsWith('#')) {
+                return line;
+            }
+            
+            // This is a segment or sub-playlist URL. Prepend our path.
+            // We strip any leading slashes to prevent // issues
+            return `/stream/${trimmedLine.replace(/^\//, '')}`;
+        });
+
+        const rewrittenPlaylist = finalLines.join('\n');
         
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.send(rewrittenPlaylist);
@@ -980,6 +996,10 @@ app.get('/stream/:segment(*)', async (req, res) => {
     }
 
     const segmentName = req.params.segment;
+    
+    // --- FIX: Construct target URL correctly ---
+    // vodBaseUrl is "https://.../path/?token=123"
+    // segmentName is "segment_1.ts" or "sub_playlist.m3u8"
     const targetUrl = new URL(segmentName, vodBaseUrl).href;
 
     console.log(`[VOD Proxy] Segment requested: ${segmentName}`);
@@ -987,6 +1007,7 @@ app.get('/stream/:segment(*)', async (req, res) => {
     try {
         const response = await axios.get(targetUrl, {
             responseType: 'stream',
+            // --- FIX: Add User-Agent header ---
             headers: { 'User-Agent': USER_AGENT }
         });
 
@@ -994,7 +1015,7 @@ app.get('/stream/:segment(*)', async (req, res) => {
         response.data.pipe(res);
 
     } catch (error) {
-        console.error(`[VOD Proxy] Error fetching segment ${segmentName}: ${error.message}`);
+        console.error(`[VOD Proxy] Error fetching segment ${segmentName} (URL: ${targetUrl}): ${error.message}`);
         res.status(500).json({ error: 'Failed to fetch segment.' });
     }
 });
@@ -1012,3 +1033,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
