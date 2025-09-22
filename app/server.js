@@ -289,8 +289,9 @@ let ffmpegProcess = null;
 let bufferManager = null; // Handle for the buffer manager
 let currentStreamUrl = ""; // The *original* URL from the user
 let currentStreamType = "NONE"; // "NONE", "LIVE", "VOD"
-let currentVodUrl = ""; // The proxied m3u8 URL
-let vodBaseUrl = ""; // The base URL for VOD segments
+let currentVodUrl = ""; // The *full, original* VOD URL with token
+let vodBaseUrl = ""; // The base URL for VOD segments (path only)
+let vodToken = ""; // The token query string for VOD segments (e.g., "?hdnts=...")
 
 const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
 const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
@@ -351,6 +352,7 @@ function stopAllStreamProcesses() {
     // 3. Reset VOD Proxy State
     currentVodUrl = "";
     vodBaseUrl = "";
+    vodToken = ""; // --- NEW: Clear VOD token ---
     
     // 4. Reset Global State
     currentStreamUrl = "";
@@ -667,26 +669,29 @@ async function startLiveStream(sourceUrl) {
 
 /**
  * --- MODIFIED: Sets the state for the VOD proxy. ---
+ * This now correctly parses the URL to separate the base path from the token.
  */
 function startVodProxy(sourceUrl) {
     console.log(`[Stream Start] VOD Mode starting for: ${sourceUrl}`);
     
     try {
-        // --- FIX: Calculate and store the base URL for segments ---
         const urlObj = new URL(sourceUrl);
-        // Get path up to the last '/'
+        
+        // --- FIX: Store the token query string ---
+        vodToken = urlObj.search; // e.g., "?hdnts=st=...&hdcore=..."
+        
+        // --- FIX: Create a *clean* base URL (path only) ---
         urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
-        // Clear search params from the *base* URL
-        urlObj.search = ''; 
+        urlObj.search = ''; // Remove token from base path
+        vodBaseUrl = urlObj.toString(); // e.g., "https://.../e2e63f4f3aa84a00b71ab1d6e3426036/"
         
-        vodBaseUrl = urlObj.toString(); // This is now clean, e.g., https://.../path/
-        
-        currentVodUrl = sourceUrl; // This remains the full URL to the main playlist
+        currentVodUrl = sourceUrl; // Store original full URL for the main playlist
         currentStreamType = "VOD";
-        currentStreamUrl = sourceUrl; // Store original URL
+        currentStreamUrl = sourceUrl; // Store original URL for the UI
         
         console.log(`[VOD Proxy] Ready. Serving from /stream/live.m3u8`);
         console.log(`[VOD Proxy] Segment Base URL set to: ${vodBaseUrl}`);
+        console.log(`[VOD Proxy] Token query set to: ${vodToken}`);
         return true;
 
     } catch (error) {
@@ -968,29 +973,30 @@ app.get('/stream/live.m3u8', async (req, res) => {
 
 /**
  * --- MODIFIED: Segment and sub-playlist proxy ---
- * This endpoint is now "playlist-aware".
- * If it proxies a .m3u8 file, it rewrites it.
- * If it proxies a .ts file, it streams it.
+ * This endpoint is now "playlist-aware" and "token-aware".
+ * It correctly rebuilds the Akamai URL with the token for every request.
  */
 app.get('/stream/:segment(*)', async (req, res) => {
-    if (currentStreamType !== 'VOD' || !vodBaseUrl) {
-        return res.status(404).json({ error: 'No VOD stream is active.' });
+    if (currentStreamType !== 'VOD' || !vodBaseUrl || !vodToken) {
+        return res.status(404).json({ error: 'No VOD stream is active or token is missing.' });
     }
 
     // e.g., "path/to/sub.m3u8" or "path/to/seg.ts"
     const requestedPath = req.params.segment; 
     
-    // Construct the full URL to fetch from the origin
-    const targetUrl = new URL(requestedPath, vodBaseUrl).href;
+    // --- FIX: Construct the full target URL with token ---
+    const targetUrl = new URL(requestedPath, vodBaseUrl);
+    targetUrl.search = vodToken; // Append the stored token (e.g., "?hdnts=...")
+    const finalTargetUrl = targetUrl.href;
 
-    // --- NEW: Check if the requested asset is a playlist ---
+    // Check if the requested asset is a playlist
     const isPlaylist = requestedPath.split('?')[0].endsWith('.m3u8');
 
     try {
         if (isPlaylist) {
             // It's a playlist: fetch as text, rewrite, and send
             console.log(`[VOD Proxy] Rewriting playlist: ${requestedPath}`);
-            const response = await axios.get(targetUrl, {
+            const response = await axios.get(finalTargetUrl, {
                 responseType: 'text', // Fetch as text
                 headers: { 'User-Agent': USER_AGENT }
             });
@@ -1000,6 +1006,7 @@ app.get('/stream/:segment(*)', async (req, res) => {
                 ? requestedPath.substring(0, requestedPath.lastIndexOf('/') + 1)
                 : "";
 
+            // Rewrite all relative lines inside this sub-playlist
             const rewrittenPlaylist = response.data.split('\n').map(line => {
                 const trimmedLine = line.trim();
                 if (trimmedLine.length === 0 || trimmedLine.startsWith('#')) {
@@ -1008,6 +1015,7 @@ app.get('/stream/:segment(*)', async (req, res) => {
                 
                 // This is a segment or sub-playlist URL.
                 // Prepend our full proxy path including the sub-path
+                // e.g., "segment.ts" -> "/stream/path/to/segment.ts"
                 return `/stream/${subPath}${trimmedLine}`;
             }).join('\n');
             
@@ -1017,7 +1025,7 @@ app.get('/stream/:segment(*)', async (req, res) => {
         } else {
             // It's a segment (.ts, .aac, etc.): pipe it directly
             // console.log(`[VOD Proxy] Piping segment: ${requestedPath}`); // Too noisy for logs
-            const response = await axios.get(targetUrl, {
+            const response = await axios.get(finalTargetUrl, {
                 responseType: 'stream',
                 headers: { 'User-Agent': USER_AGENT }
             });
@@ -1029,17 +1037,17 @@ app.get('/stream/:segment(*)', async (req, res) => {
                  res.setHeader('Content-Type', 'audio/aac');
             }
             
+            // Pipe the data directly from Akamai to the user
             response.data.pipe(res);
         }
 
-    } catch (error)
-        {
-        // Don't log 404s as full errors, they are common
-        if (error.response && error.response.status === 404) {
-             console.warn(`[VOD Proxy] Asset not found (404): ${requestedPath}`);
-             res.status(404).json({ error: 'VOD asset not found.' });
+    } catch (error) {
+        // Handle errors (like 403 Forbidden or 404 Not Found)
+        if (error.response) {
+             console.error(`[VOD Proxy] Error fetching asset ${requestedPath} (URL: ${finalTargetUrl}). Status: ${error.response.status}`);
+             res.status(error.response.status).json({ error: `Failed to fetch VOD asset. Upstream status: ${error.response.status}` });
         } else {
-            console.error(`[VOD Proxy] Error fetching asset ${requestedPath} (URL: ${targetUrl}): ${error.message}`);
+            console.error(`[VOD Proxy] Error fetching asset ${requestedPath} (URL: ${finalTargetUrl}): ${error.message}`);
             res.status(500).json({ error: 'Failed to fetch VOD asset.' });
         }
     }
@@ -1058,3 +1066,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
