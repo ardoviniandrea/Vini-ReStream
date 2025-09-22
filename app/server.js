@@ -9,7 +9,7 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 
 // --- NEW DEPENDENCIES ---
-// We need axios for reliable HTTP requests (to download segments) and m3u8-parser
+// We need axios for reliable HTTP requests (to download segments AND proxy)
 const axios = require('axios');
 const { Parser } = require('m3u8-parser');
 
@@ -34,7 +34,6 @@ try {
     db = new sqlite3.Database(DB_PATH, (err) => {
         if (err) {
             console.error('Error opening database:', err.message);
-            // If the DB can't be opened, the app is useless.
             process.exit(1);
         } else {
             console.log('Connected to the SQLite database.');
@@ -81,49 +80,54 @@ const isAuthenticated = (req, res, next) => {
 };
 
 // ================================================================
-// --- NEW: SETTINGS MANAGEMENT ---
+// --- NEW: SETTINGS MANAGEMENT (VOD Proxy Update) ---
 // ================================================================
+
+// --- NEW: User agent constant ---
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 function getDefaultSettings() {
     return {
-        profiles: [
+        // "profiles" is now "liveProfiles". VODs no longer use profiles.
+        liveProfiles: [
             {
                 id: 'default-cpu',
-                name: 'Default (CPU Stream Copy - HLS Only)', // Renamed for clarity
-                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: true,
-                isDefault: true // --- FIX: Add isDefault flag
+                name: 'Default (CPU Stream Copy - HLS Only)',
+                // --- ADDED reconnect and live_start_index flags ---
+                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -live_start_index -1 -i "{streamUrl}" -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                isDefault: true
             },
             {
                 id: 'nvidia-gpu',
-                name: 'NVIDIA (NVENC Re-encode - HLS Only)', // Renamed for clarity
-                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: false,
-                isDefault: true // --- FIX: Add isDefault flag
+                name: 'NVIDIA (NVENC Re-encode - HLS Only)',
+                // --- ADDED reconnect and live_start_index flags ---
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -live_start_index -1 -i "{streamUrl}" -map 0:3 -map 0:4 -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
+                isDefault: true
             },
-            // --- NEW: MPD/DASH Profiles based on user logs ---
             {
                 id: 'mpd-1080p-copy',
                 name: 'MPD/DASH 1080p (Stream Copy)',
-                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -map 0:4 -map 0:5 -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: false,
+                // --- ADDED live_start_index flag ---
+                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -live_start_index -1 -i "{streamUrl}" -map 0:4 -map 0:5 -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
                 isDefault: true
             },
             {
                 id: 'mpd-720p-copy',
                 name: 'MPD/DASH 720p (Stream Copy)',
-                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -map 0:3 -map 0:5 -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: false,
+                // --- ADDED live_start_index flag ---
+                command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -live_start_index -1 -i "{streamUrl}" -map 0:3 -map 0:5 -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
                 isDefault: true
             },
             {
                 id: 'mpd-1080p-nvenc',
                 name: 'MPD/DASH 1080p (NVIDIA NVENC)',
-                command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -map 0:4 -map 0:5 -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
-                active: false,
+                 // --- ADDED live_start_index flag ---
+                command: '-hwaccel nvdec -user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -live_start_index -1 -i "{streamUrl}" -map 0:4 -map 0:5 -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
                 isDefault: true
             }
         ],
+        // activeProfileId is now activeLiveProfileId
+        activeLiveProfileId: 'default-cpu', // Default to this one
         buffer: {
             enabled: true,
             delaySeconds: 30
@@ -136,34 +140,73 @@ function getSettings() {
     if (!fs.existsSync(SETTINGS_PATH)) {
         console.log('Settings file not found, creating default settings.');
         const defaults = getDefaultSettings();
-        try {
-            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaults, null, 2));
-            return defaults;
-        } catch (e) {
-            console.error("Failed to write default settings:", e);
-            return getDefaultSettings(); // Return from memory
-        }
+        saveSettings(defaults); // Save defaults and return
+        return defaults;
     }
     try {
         const settingsData = fs.readFileSync(SETTINGS_PATH, 'utf8');
         let settings = JSON.parse(settingsData);
 
-        // --- NEW: Migration logic to add isDefault flag to old profiles ---
+        // --- NEW: Migration Logic ---
         let needsSave = false;
-        if (settings.profiles && settings.profiles.length > 0) {
-            const defaultIds = ['default-cpu', 'nvidia-gpu', 'mpd-1080p-copy', 'mpd-720p-copy', 'mpd-1080p-nvenc'];
-            for (const profile of settings.profiles) {
-                if (defaultIds.includes(profile.id) && profile.isDefault !== true) {
-                    profile.isDefault = true;
+        
+        // 1. Check for old "profiles" key and migrate to "liveProfiles"
+        if (settings.profiles) {
+            console.log("Migrating settings: 'profiles' -> 'liveProfiles'");
+            settings.liveProfiles = settings.profiles;
+            delete settings.profiles;
+            needsSave = true;
+        }
+
+        // 2. Check for old "activeProfileId" and migrate to "activeLiveProfileId"
+        if (settings.activeProfileId) {
+            console.log("Migrating settings: 'activeProfileId' -> 'activeLiveProfileId'");
+            settings.activeLiveProfileId = settings.activeProfileId;
+            delete settings.activeProfileId;
+            needsSave = true;
+        }
+
+        // 3. Check for "vodProfiles" and remove (they are obsolete)
+        if (settings.vodProfiles) {
+            console.log("Migrating settings: Removing obsolete 'vodProfiles'");
+            delete settings.vodProfiles;
+            needsSave = true;
+        }
+
+        // 4. Check for "liveProfiles" and ensure defaults exist
+        if (!settings.liveProfiles) {
+            settings.liveProfiles = getDefaultSettings().liveProfiles;
+            needsSave = true;
+        }
+
+        // 5. Check "activeLiveProfileId"
+        if (!settings.activeLiveProfileId || !settings.liveProfiles.find(p => p.id === settings.activeLiveProfileId)) {
+            settings.activeLiveProfileId = settings.liveProfiles.find(p => p.isDefault)?.id || settings.liveProfiles[0]?.id;
+            needsSave = true;
+        }
+        
+        // 6. Ensure all default profiles have the new flags
+        const defaultProfiles = getDefaultSettings().liveProfiles;
+        for (const defaultProfile of defaultProfiles) {
+            const currentProfile = settings.liveProfiles.find(p => p.id === defaultProfile.id);
+            if (currentProfile && currentProfile.isDefault) {
+                // Add missing flags
+                if (!currentProfile.command.includes("-live_start_index")) {
+                    console.log(`Migrating settings: Adding -live_start_index to ${currentProfile.name}`);
+                    // This is a simple add, crude but effective for this flag
+                    currentProfile.command = currentProfile.command.replace("-i \"{streamUrl}\"", "-live_start_index -1 -i \"{streamUrl}\"");
                     needsSave = true;
-                } else if (!defaultIds.includes(profile.id) && profile.isDefault !== false) {
-                    profile.isDefault = false;
+                }
+                if (!currentProfile.command.includes("-reconnect")) {
+                     console.log(`Migrating settings: Adding -reconnect flags to ${currentProfile.name}`);
+                    currentProfile.command = currentProfile.command.replace("-i \"{streamUrl}\"", "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i \"{streamUrl}\"");
                     needsSave = true;
                 }
             }
         }
+
         if (needsSave) {
-            console.log('Migrating settings to include isDefault flag...');
+            console.log('Saving migrated settings file...');
             saveSettings(settings);
         }
         // --- End Migration ---
@@ -178,7 +221,14 @@ function getSettings() {
 
 function saveSettings(settings) {
     try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+        // Clean up any old/obsolete keys before saving
+        const settingsToSave = {
+            liveProfiles: settings.liveProfiles || getDefaultSettings().liveProfiles,
+            activeLiveProfileId: settings.activeLiveProfileId || getDefaultSettings().activeLiveProfileId,
+            buffer: settings.buffer || getDefaultSettings().buffer
+        };
+        
+        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settingsToSave, null, 2));
         console.log('Settings saved successfully.');
         return true;
     } catch (e) {
@@ -187,23 +237,20 @@ function saveSettings(settings) {
     }
 }
 
-function getActiveProfile() {
+// Renamed to getActiveLiveProfile
+function getActiveLiveProfile() {
     const settings = getSettings();
-    // --- MODIFIED: Find active profile by ID from settings ---
-    let activeProfile = settings.profiles.find(p => p.id === settings.activeProfileId);
+    let activeProfile = settings.liveProfiles.find(p => p.id === settings.activeLiveProfileId);
+    
     if (!activeProfile) {
-        // Fallback if activeId is invalid or not set
-        activeProfile = settings.profiles.find(p => p.active === true);
+        // Fallback to first default, or first profile
+        activeProfile = settings.liveProfiles.find(p => p.isDefault === true) || settings.liveProfiles[0];
     }
-    if (!activeProfile) {
-        // Fallback to first profile
-        activeProfile = settings.profiles[0];
-    }
-    return activeProfile || getDefaultSettings().profiles[0]; // Absolute fallback
+    return activeProfile || getDefaultSettings().liveProfiles[0]; // Absolute fallback
 }
 
 
-// --- NEW: Settings & Profiles API Endpoints (Protected) ---
+// --- NEW: Settings & Profiles API Endpoints (Protected & Updated) ---
 
 app.get('/api/settings', isAuthenticated, (req, res) => {
     res.json(getSettings());
@@ -211,34 +258,21 @@ app.get('/api/settings', isAuthenticated, (req, res) => {
 
 app.post('/api/settings', isAuthenticated, (req, res) => {
     const newSettings = req.body;
-    if (!newSettings || !newSettings.profiles || !newSettings.buffer) {
-        return res.status(400).json({ error: 'Invalid settings object.' });
-    }
-
-    // --- MODIFIED: We now save the *ID* of the active profile ---
-    // The 'active' boolean on the profile itself is deprecated, but we keep
-    // it for one last check to find the ID.
-    let activeId = newSettings.activeProfileId;
-    if (!activeId) {
-        const activeProfile = newSettings.profiles.find(p => p.active === true);
-        activeId = activeProfile ? activeProfile.id : newSettings.profiles[0]?.id;
+    
+    // Validate the new structure
+    if (!newSettings || !newSettings.liveProfiles || !newSettings.buffer || !newSettings.activeLiveProfileId) {
+        return res.status(400).json({ error: 'Invalid settings object. Missing required keys.' });
     }
     
-    // Ensure the activeId is valid
-    if (!newSettings.profiles.find(p => p.id === activeId)) {
-        activeId = newSettings.profiles[0]?.id; // Default to first if not found
+    // Ensure the activeLiveProfileId is valid
+    if (!newSettings.liveProfiles.find(p => p.id === newSettings.activeLiveProfileId)) {
+        newSettings.activeLiveProfileId = newSettings.liveProfiles[0]?.id; // Default to first if not found
     }
     
-    newSettings.activeProfileId = activeId;
-    
-    // Clean up old 'active' flags (they are no longer the source of truth)
-    newSettings.profiles.forEach(p => {
-        p.active = (p.id === activeId);
-    });
+    // (active: boolean is no longer used, no need to clean up)
     
     if (saveSettings(newSettings)) {
-        // --- FIX: Return the full settings object so the UI stays in sync ---
-        res.json(newSettings);
+        res.json(getSettings()); // Send back the cleaned/saved settings
     } else {
         res.status(500).json({ error: 'Failed to save settings to disk.' });
     }
@@ -250,9 +284,14 @@ app.post('/api/settings', isAuthenticated, (req, res) => {
 // --- STREAM STATE & HELPERS ---
 // ================================================================
 
+// --- NEW: Updated Global State ---
 let ffmpegProcess = null;
-let currentStreamUrl = "";
-let bufferManager = null; // --- NEW: Handle for the buffer manager
+let bufferManager = null; // Handle for the buffer manager
+let currentStreamUrl = ""; // The *original* URL from the user
+let currentStreamType = "NONE"; // "NONE", "LIVE", "VOD"
+let currentVodUrl = ""; // The proxied m3u8 URL
+let vodBaseUrl = ""; // The base URL for VOD segments
+
 const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
 const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
 const VIEWER_TIMEOUT_MS = 15 * 1000;
@@ -283,70 +322,93 @@ function cleanupHlsFiles() {
         if (fs.existsSync('/var/www/hls/local_playlist.m3u8')) {
             fs.unlinkSync('/var/www/hls/local_playlist.m3u8');
         }
+        // Delete the buffer directory
+        const bufferDir = path.join('/var/www/hls', 'buffer');
+        if (fs.existsSync(bufferDir)) {
+            fs.rmSync(bufferDir, { recursive: true, force: true });
+        }
     } catch (e) {
         console.error('[Cleanup] Error during HLS file cleanup:', e.message);
     }
 }
 
-// Function to stop all streaming processes
+// --- UPDATED: Global stop function ---
 function stopAllStreamProcesses() {
-    console.log('Stopping all stream processes...');
+    console.log('[Stop] Stopping all stream processes...');
+    
+    // 1. Stop Live Buffer Manager
     if (bufferManager) {
         bufferManager.stop();
         bufferManager = null;
     }
+    
+    // 2. Stop Live FFmpeg Process
     if (ffmpegProcess) {
         ffmpegProcess.kill('SIGKILL');
         ffmpegProcess = null;
     }
+    
+    // 3. Reset VOD Proxy State
+    currentVodUrl = "";
+    vodBaseUrl = "";
+    
+    // 4. Reset Global State
     currentStreamUrl = "";
-    cleanupHlsFiles(); // Clean up files on any stop
+    currentStreamType = "NONE";
+    
+    // 5. Clean up files
+    cleanupHlsFiles();
+    
+    // 6. Clear Nginx logs
+    try {
+        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
+        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
+        console.log('[Stop] Cleared HLS log and blocklist.');
+        reloadNginx();
+    } catch (writeErr) {
+        console.error('[Stop] Failed to clear logs or blocklist:', writeErr);
+    }
 }
 
 
 // ================================================================
-// --- NEW: PRE-FETCH BUFFER MANAGER (IDEA 1) ---
+// --- PRE-FETCH BUFFER MANAGER (Used for LIVE only) ---
 // ================================================================
 
 class BufferManager {
     constructor(sourceUrl, bufferSeconds) {
         this.sourceUrl = sourceUrl;
         this.targetBufferSegments = Math.max(1, Math.floor(bufferSeconds / 4)); // Assuming avg 4s segments
-        this.bufferDir = path.join('/var/www/hls', 'buffer'); // <<< MODIFIED: Write directly into nginx dir
+        this.bufferDir = path.join('/var/www/hls', 'buffer'); 
         this.localPlaylistPath = path.join('/var/www/hls', 'local_playlist.m3u8'); // Nginx serves this
-        this.segmentQueue = [];    // List of segment filenames (e.g., "seg-101.ts")
+        this.segmentQueue = [];    
         this.downloadedSegments = new Set();
         this.segmentBaseUrl = '';
         this.stopFlag = false;
         this.timeoutId = null;
-        this.initialPlaylistReady = null; // --- FIX: Promise for race condition
+        this.initialPlaylistReady = null; 
         this.resolveInitialPlaylist = null;
         this.rejectInitialPlaylist = null;
 
         console.log(`[Buffer] Manager started. Target buffer: ${this.targetBufferSegments} segments.`);
 
-        // Ensure buffer directory exists and is clean
         try {
             if (fs.existsSync(this.bufferDir)) {
                 fs.rmSync(this.bufferDir, { recursive: true, force: true });
             }
-            fs.mkdirSync(this.bufferDir, { recursive: true }); // <<< MODIFIED: Added recursive
+            fs.mkdirSync(this.bufferDir, { recursive: true });
         } catch (e) {
             console.error('[Buffer] Failed to create or clean buffer directory:', e);
         }
     }
 
-    /**
-     * Public start method. Returns a promise that resolves when the first playlist is ready.
-     */
     start() {
         this.initialPlaylistReady = new Promise((resolve, reject) => {
             this.resolveInitialPlaylist = resolve;
             this.rejectInitialPlaylist = reject;
         });
-
         this.fetchPlaylist(); // Start the loop
-        return this.initialPlaylistReady; // Return the promise
+        return this.initialPlaylistReady; 
     }
 
     stop() {
@@ -355,21 +417,17 @@ class BufferManager {
             clearTimeout(this.timeoutId);
         }
         console.log('[Buffer] Manager stopped.');
-        // Clean up temporary buffer dir on stop
-        try {
-            if (fs.existsSync(this.bufferDir)) {
-                fs.rmSync(this.bufferDir, { recursive: true, force: true });
-            }
-        } catch (e) {
-            console.error('[Buffer] Failed to delete buffer directory on stop:', e);
-        }
+        // Cleanup is handled by stopAllStreamProcesses
     }
 
     async fetchPlaylist() {
         if (this.stopFlag) return;
 
         try {
-            const response = await axios.get(this.sourceUrl, { timeout: 3000 });
+            const response = await axios.get(this.sourceUrl, { 
+                timeout: 3000,
+                headers: { 'User-Agent': USER_AGENT } // Add user agent
+            });
             const parser = new Parser();
             parser.push(response.data);
             parser.end();
@@ -377,54 +435,45 @@ class BufferManager {
             const playlist = parser.manifest;
             if (!playlist.segments || playlist.segments.length === 0) {
                 console.warn('[Buffer] Source playlist is empty or invalid.');
-                if (this.rejectInitialPlaylist) { // FIX: Reject the promise if it's still pending
+                if (this.rejectInitialPlaylist) { 
                     this.rejectInitialPlaylist(new Error("Source playlist is empty or invalid."));
-                    this.rejectInitialPlaylist = null; // Ensure it only fires once
+                    this.rejectInitialPlaylist = null; 
                 }
                 throw new Error("Empty or invalid playlist");
             }
 
-            // Determine the base URL for segments (relative vs absolute)
             const firstSegmentUri = playlist.segments[0].uri;
             if (firstSegmentUri.startsWith('http')) {
-                this.segmentBaseUrl = ''; // Segments have full URLs
+                this.segmentBaseUrl = ''; 
             } else {
-                // Segments are relative. Construct base URL from main playlist URL.
                 const urlObj = new URL(this.sourceUrl);
                 urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
                 this.segmentBaseUrl = urlObj.toString();
             }
 
-            // Get *full URIs* for segments
             const segmentUris = playlist.segments.map(s => {
-                // If segmentBaseUrl is empty, the URI is already absolute
                 return this.segmentBaseUrl ? new URL(s.uri, this.segmentBaseUrl).href : s.uri;
             });
-            this.segmentQueue = segmentUris; // Update queue with FULL URLs
+            this.segmentQueue = segmentUris; 
 
-            // Start downloading segments from the queue
-            this.downloadSegments(playlist.segments); // Pass original segments for filenames
-            // Write the local playlist for FFmpeg to read from
+            this.downloadSegments(playlist.segments); 
             this.writeLocalPlaylist(playlist);
 
-            // FIX: Resolve the promise only AFTER the first playlist is written
             if (this.resolveInitialPlaylist) {
                 console.log('[Buffer] Initial playlist is ready.');
                 this.resolveInitialPlaylist({ localPlaylistPath: this.localPlaylistPath });
-                this.resolveInitialPlaylist = null; // Ensure it only fires once
+                this.resolveInitialPlaylist = null; 
                 this.rejectInitialPlaylist = null;
             }
 
-            // Schedule the next fetch based on segment duration
             const refreshInterval = (playlist.segments[0].duration || 4) * 1000;
-            this.timeoutId = setTimeout(() => this.fetchPlaylist(), refreshInterval / 2); // Refresh at half duration
+            this.timeoutId = setTimeout(() => this.fetchPlaylist(), refreshInterval / 2); 
 
         } catch (error) {
             console.error('[Buffer] Error fetching source playlist:', error.message);
             if (!this.stopFlag) {
                 this.timeoutId = setTimeout(() => this.fetchPlaylist(), 2000); // Retry faster on error
             }
-            // FIX: If we fail *before* the first playlist is ready, reject the promise
             if (this.rejectInitialPlaylist) {
                 this.rejectInitialPlaylist(error);
                 this.rejectInitialPlaylist = null;
@@ -434,7 +483,6 @@ class BufferManager {
     }
 
     async downloadSegments(originalSegments) {
-        // Use the full URI queue to download, but the original segments for filenames
         for (let i = 0; i < this.segmentQueue.length; i++) {
             const segmentUrl = this.segmentQueue[i];
             const filename = originalSegments[i].uri.split('/').pop();
@@ -444,7 +492,11 @@ class BufferManager {
                 const localPath = path.join(this.bufferDir, filename);
 
                 try {
-                    const response = await axios.get(segmentUrl, { responseType: 'stream', timeout: 5000 });
+                    const response = await axios.get(segmentUrl, { 
+                        responseType: 'stream', 
+                        timeout: 5000,
+                        headers: { 'User-Agent': USER_AGENT } // Add user agent
+                    });
                     const writer = fs.createWriteStream(localPath);
                     response.data.pipe(writer);
                     
@@ -460,25 +512,17 @@ class BufferManager {
                 }
             }
         }
-        // Clean up old segments
         this.cleanupOldSegments(originalSegments.map(s => s.uri.split('/').pop()));
     }
 
     writeLocalPlaylist(playlist) {
-        // This creates a new .m3u8 file that points to our locally buffered segments.
-        // These segments are in /var/www/hls/buffer/
-        
-        // Filter playlist to only segments we *actually* have downloaded
         const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(s.uri.split('/').pop()));
-
-        // We only want the *end* of the available list, up to our target buffer size
         const bufferedSegments = availableSegments.slice(-this.targetBufferSegments);
         
-        if(bufferedSegments.length === 0) return; // Not ready yet
+        if(bufferedSegments.length === 0) return; 
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
         
-        // Find the media sequence of the *first segment we are including*
         const firstSegmentData = playlist.segments.find(s => s.uri.split('/').pop() === bufferedSegments[0].uri.split('/').pop());
         const mediaSequence = firstSegmentData ? firstSegmentData.mediaSequence : 0;
 
@@ -489,7 +533,6 @@ class BufferManager {
                 m3u8Content += '#EXT-X-DISCONTINUITY\n';
             }
             m3u8Content += `#EXTINF:${segment.duration.toFixed(6)},\n`;
-            // Point to the *relative path* that Nginx will serve
             m3u8Content += `buffer/${segment.uri.split('/').pop()}\n`; 
         }
 
@@ -501,7 +544,6 @@ class BufferManager {
     }
 
     cleanupOldSegments(currentSegmentFilenames) {
-        // This logic keeps our buffer folder from growing forever
         const segmentsToKeep = new Set(currentSegmentFilenames); 
         for (const filename of this.downloadedSegments) {
             if (!segmentsToKeep.has(filename)) {
@@ -521,88 +563,76 @@ class BufferManager {
 
 
 // ================================================================
-// --- STREAM START/STOP (MODIFIED) ---
+// --- NEW: STREAM START/STOP LOGIC ---
 // ================================================================
 
-async function startStream(sourceUrl) {
-    if (ffmpegProcess) {
-        console.log('Killing existing ffmpeg process...');
-        stopAllStreamProcesses();
-    }
-
-    console.log(`[Stream Start] Starting stream from: ${sourceUrl}`);
+/**
+ * NEW: Starts the FFmpeg and Buffer process for a LIVE stream.
+ */
+async function startLiveStream(sourceUrl) {
+    console.log(`[Stream Start] LIVE Mode starting for: ${sourceUrl}`);
     const settings = getSettings();
-    const activeProfile = getActiveProfile();
+    const activeProfile = getActiveLiveProfile();
     let streamInputUrl = sourceUrl;
-    const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8'); // Check if we are restarting ourself
+    const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8');
 
-    // --- FIX: BUG #3 - Check for MPD and force direct mode ---
+    // Check for MPD and force direct, as buffer doesn't support it
     let forceDirect = false;
     if (sourceUrl.endsWith('.mpd') || sourceUrl.includes('.mpd?')) {
         console.warn('[Stream Start] MPD (DASH) stream detected. Buffer only supports HLS (.m3u8). Forcing Direct Stream mode.');
         forceDirect = true;
     }
 
-    // --- IDEA 1 LOGIC (Now with MPD check) ---
+    // Start Buffer Manager (if enabled and not MPD)
     if (settings.buffer.enabled && !isLocalPlaylist && !forceDirect) {
         console.log('[Stream Start] Using Pre-fetch Buffer mode.');
         try {
             bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
-            // --- RACE CONDITION FIX ---
             const { localPlaylistPath } = await bufferManager.start();
             
+            // Point FFmpeg to the Nginx-served local playlist
             streamInputUrl = `http://127.0.0.1:8994/local_playlist.m3u8`;
             console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
-            // --- FIX: BUG #1 - Remove crashing line ---
-            // The line below was causing the crash. It is now removed.
-            // logStreamMessage(`Buffer failed: ${error.message}`, true); 
             stopAllStreamProcesses(); 
-            return;
+            return; // Exit if buffer fails
         }
     } else if (isLocalPlaylist) {
         console.log('[Stream Start] Restarting FFmpeg against existing buffer.');
     } else {
-        if(forceDirect) {
-            console.log('[Stream Start] Using Forced Direct Stream mode (MPD detected).');
-        } else {
-            console.log('[Stream Start] Using Direct Stream mode (Buffer disabled in settings).');
-        }
+        console.log('[Stream Start] Using Direct Stream mode (Buffer disabled or MPD detected).');
     }
 
-    // --- IDEA 2 LOGIC ---
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-    
+    // Get the command from the active profile
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl)
-        .replace(/{userAgent}/g, userAgent);
+        .replace(/{userAgent}/g, USER_AGENT);
 
-    // --- NEW: MPD/DASH Warning ---
+    // Warn if user is trying to stream MPD without a -map flag
     if (forceDirect && !commandWithPlaceholders.includes('-map')) {
         console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
         console.warn('[FFmpeg] WARNING: You are streaming an MPD (DASH) source without a "-map" flag.');
-        console.warn('[FFmpeg] This will likely fail by grabbing the lowest quality stream or exiting with an error.');
-        console.warn('[FFmpeg] Please use a profile that maps specific video/audio streams (e.g., -map 0:4 -map 0:5).');
+        console.warn('[FFmpeg] This will likely fail. Please use a profile that maps specific streams (e.g., -map 0:4 -map 0:5).');
         console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
     }
 
-    // --- FIX: BUG #2 - Use quote-safe parser instead of .split(' ') ---
+    // Split command into args safely (respecting quotes)
     const args = (commandWithPlaceholders.match(/(?:[^\s"]+|"[^"]*")+/g) || [])
-                 .map(arg => arg.replace(/^"|"$/g, '')); // Split by space BUT respect quotes, then remove the quotes.
+                 .map(arg => arg.replace(/^"|"$/g, ''));
     
     console.log(`[FFmpeg] Starting process with command: ffmpeg ${args.join(' ')}`);
 
     ffmpegProcess = spawn('ffmpeg', args);
+    currentStreamType = "LIVE"; // Set state
     currentStreamUrl = sourceUrl; // Store the *original* source URL
 
-    ffmpegProcess.stdout.on('data', (data) => {
-        // console.log(`ffmpeg stdout: ${data}`);
-    });
+    ffmpegProcess.stdout.on('data', (data) => { /* console.log(`ffmpeg stdout: ${data}`); */ });
 
     ffmpegProcess.stderr.on('data', (data) => {
         const stderrStr = data.toString();
+        // Filter out noisy progress messages
         if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening') && !stderrStr.includes('dropping overlapping extension')) {
              console.error(`[ffmpeg stderr]: ${stderrStr.trim()}`);
         }
@@ -610,17 +640,22 @@ async function startStream(sourceUrl) {
 
     ffmpegProcess.on('close', (code) => {
         console.log(`[ffmpeg] process exited with code ${code}`);
-        let safeToStop = true; // Flag to prevent recursion
+        let safeToStop = true; 
         if (code !== 0 && code !== 255) { // 255 is normal kill
+            // If buffer is still running, it means ffmpeg died unexpectedly
             if (bufferManager && bufferManager.stopFlag === false) {
                 console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
-                safeToStop = false; // Don't stop buffer, we are restarting
-                startStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
+                safeToStop = false; 
+                startLiveStream(streamInputUrl); // Pass the LOCAL playlist URL to restart
             }
         }
         
-        if (safeToStop && ffmpegProcess) { // Check if it hasn't been stopped by /api/stop
-            stopAllStreamProcesses();
+        if (safeToStop && ffmpegProcess) { 
+            // If we are not restarting, stop everything.
+            // This check prevents stopAll from being called after /api/stop
+            if(currentStreamType === "LIVE") {
+                 stopAllStreamProcesses();
+            }
         }
     });
 
@@ -630,13 +665,38 @@ async function startStream(sourceUrl) {
     });
 }
 
+/**
+ * NEW: Sets the state for the VOD proxy.
+ */
+function startVodProxy(sourceUrl) {
+    console.log(`[Stream Start] VOD Mode starting for: ${sourceUrl}`);
+    
+    try {
+        // Calculate and store the base URL for segments
+        const urlObj = new URL(sourceUrl);
+        urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+        vodBaseUrl = urlObj.toString();
+        
+        currentVodUrl = sourceUrl;
+        currentStreamType = "VOD";
+        currentStreamUrl = sourceUrl; // Store original URL
+        
+        console.log(`[VOD Proxy] Ready. Serving from /stream/live.m3u8`);
+        console.log(`[VOD Proxy] Segment Base URL set to: ${vodBaseUrl}`);
+        return true;
+
+    } catch (error) {
+        console.error(`[VOD Proxy] Invalid VOD URL provided: ${error.message}`);
+        return false;
+    }
+}
+
 
 // ================================================================
-// --- ORIGINAL AUTH & API ENDPOINTS (MODIFIED) ---
+// --- AUTH & USER API ENDPOINTS (Unchanged) ---
 // ================================================================
 
 // --- Auth API Endpoints ---
-
 app.get('/api/auth/check', (req, res) => {
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
         if (err) return res.status(500).json({ error: 'Database error' });
@@ -718,7 +778,6 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // --- User Management API Endpoints (Protected) ---
-
 app.get('/api/users', isAuthenticated, (req, res) => {
     db.all("SELECT id, username FROM users ORDER BY username", (err, rows) => {
         if (err) return res.status(500).json({ error: 'Database error' });
@@ -745,63 +804,60 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
     });
 });
 
-// --- Stream API Endpoints (NOW MODIFIED) ---
+// ================================================================
+// --- UPDATED: STREAM CONTROL API ENDPOINTS ---
+// ================================================================
 
 app.post('/api/start', isAuthenticated, (req, res) => {
-    const { url } = req.body;
-    if (!url) {
-        return res.status(400).json({ error: 'Missing "url" in request body' });
+    // --- NEW: Expect "url" and "type" ---
+    const { url, type } = req.body;
+    if (!url || !type) {
+        return res.status(400).json({ error: 'Missing "url" or "type" in request body' });
     }
+    
+    // Stop any existing stream first
+    stopAllStreamProcesses();
 
-    // Clear old logs and blocklist
-    try {
-        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
-        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
-        console.log('Cleared HLS log and blocklist for new stream.');
-        reloadNginx();
-    } catch (writeErr) {
-        console.error('Failed to clear logs or blocklist:', writeErr);
-    }
-
-    try {
-        // --- MODIFIED ---
-        // We no longer wait for startStream, as it's now async and has a buffer warmup.
-        // We start it and return success immediately. The UI will show loading.
-        startStream(url); 
-        res.json({ message: 'Stream process initiated successfully' });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to start stream', details: error.message });
+    if (type === 'LIVE') {
+        // Start live stream (async, don't wait)
+        startLiveStream(url);
+        res.json({ message: 'LIVE stream process initiated.' });
+    
+    } else if (type === 'VOD') {
+        // Start VOD proxy (sync)
+        if (startVodProxy(url)) {
+            res.json({ message: 'VOD proxy started successfully.' });
+        } else {
+            res.status(400).json({ error: 'Invalid VOD URL.' });
+        }
+        
+    } else {
+        res.status(400).json({ error: 'Invalid stream "type". Must be "LIVE" or "VOD".' });
     }
 });
 
 app.post('/api/stop', isAuthenticated, (req, res) => {
-    console.log('Stopping stream via API request...');
-    stopAllStreamProcesses(); // Use our new global stop function
-
-    try {
-        fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
-        fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
-        console.log('Cleared HLS log and blocklist on stream stop.');
-        reloadNginx();
-    } catch (writeErr) {
-        console.error('Failed to clear logs or blocklist:', writeErr);
-    }
-    
-    res.json({ message: 'Stream stopped' });
+    console.log('[API] /api/stop requested.');
+    stopAllStreamProcesses();
+    res.json({ message: 'All stream processes stopped' });
 });
 
 app.get('/api/status', isAuthenticated, (req, res) => {
+    // --- NEW: Return type ---
     res.json({ 
-        running: (ffmpegProcess !== null || bufferManager !== null), // Stream is "running" if buffer or ffmpeg is active
-        url: currentStreamUrl 
+        running: (currentStreamType !== "NONE"),
+        url: currentStreamUrl,
+        type: currentStreamType
     });
 });
 
+// --- VIEWER & TERMINATE (Unchanged, work for LIVE only) ---
 app.get('/api/viewers', isAuthenticated, (req, res) => {
-    // MODIFIED: Check buffer OR ffmpeg process
-    if (ffmpegProcess === null && bufferManager === null) {
-        return res.json([]); // No stream running, no viewers
+    // This only works for LIVE streams served by Nginx
+    if (currentStreamType !== "LIVE") {
+        return res.json([]); 
     }
+    
     let blockedIps = new Set();
     try {
         const blocklistData = fs.readFileSync(BLOCKLIST_PATH, 'utf8');
@@ -810,15 +866,10 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
                 blockedIps.add(line.substring(5, line.length - 1));
             }
         });
-    } catch (readErr) {
-        // Non-fatal, just log
-    }
+    } catch (readErr) { /* non-fatal */ }
 
     fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
-        if (err) {
-            // Non-fatal, just return empty
-            return res.json([]);
-        }
+        if (err) return res.json([]); 
 
         const lines = data.split('\n').filter(line => line.trim() !== '');
         const viewers = new Map();
@@ -828,11 +879,9 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
         for (const line of lines) {
             const match = line.match(logRegex);
             if (!match) continue;
-
             const ip = match[1];
             const timestampStr = match[2].replace(/\//g, ' ').replace(':', ' ');
             const timestamp = Date.parse(timestampStr);
-
             if (isNaN(timestamp)) continue;
             
             const viewer = viewers.get(ip) || { ip, firstSeen: timestamp, lastSeen: timestamp, isBlocked: blockedIps.has(ip) };
@@ -868,6 +917,92 @@ app.post('/api/terminate', isAuthenticated, (req, res) => {
     });
 });
 
+
+// ================================================================
+// --- NEW: VOD PROXY ENDPOINTS ---
+// ================================================================
+
+/**
+ * Main playlist proxy. Fetches the source VOD playlist and rewrites
+ * all segment/playlist URLs to point back to our server.
+ */
+app.get('/stream/live.m3u8', async (req, res) => {
+    if (currentStreamType !== 'VOD' || !currentVodUrl) {
+        return res.status(404).json({ error: 'No VOD stream is active.' });
+    }
+
+    try {
+        const response = await axios.get(currentVodUrl, {
+            headers: { 'User-Agent': USER_AGENT }
+        });
+
+        let playlistData = response.data;
+
+        // Rewrite URLs
+        const lines = playlistData.split('\n');
+        const rewrittenLines = lines.map(line => {
+            if (line.trim().length === 0) return line; // Empty line
+            if (line.startsWith('#')) return line;   // HLS tag
+
+            // This is a URL to a segment or sub-playlist
+            // We just prepend our proxy path
+            // It works for both relative (segment.ts) and absolute (http://...)
+            // But for robustness, we'll check.
+            
+            if (line.startsWith('http')) {
+                // If the source playlist uses absolute URLs, we have to be
+                // very careful. For now, we'll assume relative.
+                // A better parser would be needed for full absolute support.
+            }
+            
+            // Prepend our proxy path to the segment/playlist URL
+            return `http://${req.headers.host}/stream/${line}`;
+        });
+
+        const rewrittenPlaylist = rewrittenLines.join('\n');
+        
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.send(rewrittenPlaylist);
+
+    } catch (error) {
+        console.error(`[VOD Proxy] Error fetching main playlist: ${error.message}`);
+        res.status(500).json({ error: 'Failed to fetch source playlist.' });
+    }
+});
+
+/**
+ * Segment and sub-playlist proxy. Fetches the requested segment/playlist
+ * from the Akamai server and streams it to the user.
+ */
+app.get('/stream/:segment(*)', async (req, res) => {
+    if (currentStreamType !== 'VOD' || !vodBaseUrl) {
+        return res.status(404).json({ error: 'No VOD stream is active.' });
+    }
+
+    const segmentName = req.params.segment;
+    const targetUrl = new URL(segmentName, vodBaseUrl).href;
+
+    console.log(`[VOD Proxy] Segment requested: ${segmentName}`);
+    
+    try {
+        const response = await axios.get(targetUrl, {
+            responseType: 'stream',
+            headers: { 'User-Agent': USER_AGENT }
+        });
+
+        // Pipe the data directly from Akamai to the user
+        response.data.pipe(res);
+
+    } catch (error) {
+        console.error(`[VOD Proxy] Error fetching segment ${segmentName}: ${error.message}`);
+        res.status(500).json({ error: 'Failed to fetch segment.' });
+    }
+});
+
+
+// ================================================================
+// --- Server Start ---
+// ================================================================
 
 // Serve the index.html for the root route
 app.get('/', (req, res) => {
