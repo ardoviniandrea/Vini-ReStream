@@ -462,7 +462,7 @@
                         </div>
                     </div>
                 </div>
-                <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4 rounded-b-lg">
+                <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4">
                     <button type="button" id="modal-cancel-profile-btn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md">Cancel</button>
                     <button type="submit" id="modal-save-profile-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Save Profile</button>
                 </div>
@@ -754,7 +754,7 @@
         }
 
 
-        // --- User Management API Functions (Unchanged) ---
+        // --- User Management API Functions ---
         async function fetchUsers() {
             try {
                 const response = await fetchWithAuth(`${apiUrl}/users`);
@@ -817,10 +817,12 @@
                 } else {
                     logUserMessage(data.error || 'Failed to create user', true);
                 }
-            } catch (error)
+            // --- FIX: Added missing braces ---
+            } catch (error) {
                 console.error('Error adding user:', error);
                 logUserMessage(error.message, true);
             }
+            // --- END FIX ---
         }
 
         async function handleDeleteUser(userId, username) {
@@ -1365,3 +1367,4 @@
     </script>
 </body>
 </html>
+
