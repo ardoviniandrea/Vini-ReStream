@@ -474,18 +474,23 @@ class BufferManager {
             filename: s.uri.split('/').pop().split('?')[0] // Get clean filename
         }));
 
+        // --- FIX: Await segment downloads ---
         // Start downloading segments from the queue
-        this.downloadSegments(segments); 
+        await this.downloadSegments(segments); 
         
         // Write the local playlist for FFmpeg to read from
-        this.writeLocalHlsPlaylist(playlist, segments);
+        const playlistWritten = this.writeLocalHlsPlaylist(playlist, segments);
 
+        // --- FIX: Only resolve promise if file was actually written ---
         // Resolve the promise if this is the first successful run
-        if (this.resolveInitialPlaylist) {
+        if (this.resolveInitialPlaylist && playlistWritten) {
             console.log('[Buffer] Initial HLS playlist is ready.');
             this.resolveInitialPlaylist({ localManifestPath: this.localManifestPath });
             this.resolveInitialPlaylist = null; 
             this.rejectInitialPlaylist = null;
+        } else if (this.resolveInitialPlaylist && !playlistWritten) {
+            console.warn('[Buffer] Playlist not written, will retry. Not resolving initial promise yet.');
+            // Don't resolve, let the next fetch attempt to resolve
         }
 
         // Schedule the next fetch
@@ -502,7 +507,7 @@ class BufferManager {
         
         if (bufferedSegments.length === 0) {
             console.warn('[Buffer] No buffered HLS segments available to write playlist.');
-            return; 
+            return false; // --- FIX: Return false ---
         }
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
@@ -531,8 +536,10 @@ class BufferManager {
 
         try {
              fs.writeFileSync(this.localManifestPath, m3u8Content);
+             return true; // --- FIX: Return true ---
         } catch (e) {
             console.error('[Buffer] Failed to write local HLS playlist:', e.message);
+            return false; // --- FIX: Return false ---
         }
     }
 
@@ -580,18 +587,23 @@ class BufferManager {
             throw new Error("Source MPD manifest is empty or invalid.");
         }
 
+        // --- FIX: Await segment downloads ---
         // Start downloading all segments
-        this.downloadSegments(segmentsToFetch);
+        await this.downloadSegments(segmentsToFetch);
 
         // Write the local manifest file for FFmpeg
-        this.writeLocalMpdManifest();
+        const manifestWritten = this.writeLocalMpdManifest();
 
+        // --- FIX: Only resolve promise if file was actually written ---
         // Resolve the promise if this is the first successful run
-        if (this.resolveInitialPlaylist) {
+        if (this.resolveInitialPlaylist && manifestWritten) {
             console.log('[Buffer] Initial MPD manifest is ready.');
             this.resolveInitialPlaylist({ localManifestPath: this.localManifestPath });
             this.resolveInitialPlaylist = null; 
             this.rejectInitialPlaylist = null;
+        } else if (this.resolveInitialPlaylist && !manifestWritten) {
+            console.warn('[Buffer] Manifest not written, will retry. Not resolving initial promise yet.');
+            // Don't resolve, let the next fetch attempt to resolve
         }
 
         // Schedule the next fetch
@@ -602,7 +614,7 @@ class BufferManager {
     writeLocalMpdManifest() {
         if (!this.mpdManifest) {
             console.warn('[Buffer] No MPD manifest data to write.');
-            return;
+            return false; // --- FIX: Return false ---
         }
 
         // Deep-clone the manifest to avoid modifying the original
@@ -631,15 +643,17 @@ class BufferManager {
 
         if (!segmentsAvailable) {
             console.warn('[Buffer] No buffered MPD segments available to write manifest.');
-            return;
+            return false; // --- FIX: Return false ---
         }
         
         try {
             // Convert the modified JSON object back to XML
             const manifestXml = mpdParser.toMpd(localManifest);
             fs.writeFileSync(this.localManifestPath, manifestXml);
+            return true; // --- FIX: Return true ---
         } catch (e) {
             console.error('[Buffer] Failed to write local MPD manifest:', e.message);
+            return false; // --- FIX: Return false ---
         }
     }
 
@@ -1094,3 +1108,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
