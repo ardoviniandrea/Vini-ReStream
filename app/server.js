@@ -907,7 +907,7 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
          return res.status(400).json({ error: 'You cannot delete yourself.' });
     }
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-        if (err) return res.status(5R00).json({ error: 'Database error' });
+        if (err) return res.status(500).json({ error: 'Database error' });
         if (row.count <= 1) {
             return res.status(400).json({ error: 'Cannot delete the last user.' });
         }
