@@ -5,11 +5,13 @@ FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Node.js and build essentials
+# --- MODIFIED: Added python3 for node-gyp (build tool for sqlite3/bcrypt) ---
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    gnupg && \
+    gnupg \
+    python3 && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
@@ -20,6 +22,7 @@ WORKDIR /usr/src/app
 COPY app/package*.json ./
 
 # Install all dependencies for the app
+# This is where the GitHub Action was failing
 RUN npm install
 
 # Copy all app source code
@@ -78,4 +81,3 @@ EXPOSE 8994
 
 # Start supervisord as the main command (as root)
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
-
