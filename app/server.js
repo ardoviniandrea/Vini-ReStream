@@ -438,8 +438,33 @@ class BufferManager {
         parser.end();
 
         const playlist = parser.manifest;
+
+        // --- NEW: Handle HLS Master Playlists (Variant Streams) ---
+        if (playlist.playlists && playlist.playlists.length > 0) {
+            console.log(`[Buffer] Detected HLS Master Playlist with ${playlist.playlists.length} variants.`);
+            // Automatically select a variant. Let's pick the last one (often highest quality).
+            const selectedVariant = playlist.playlists[playlist.playlists.length - 1];
+            // Resolve the new URL relative to the master playlist's base URL
+            const newUrl = new URL(selectedVariant.uri, this.sourceBaseUrl).href;
+
+            // Update the manager's source URL and base URL to point to the selected variant stream
+            this.sourceUrl = newUrl;
+            const urlObj = new URL(newUrl);
+            const pathOnly = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+            urlObj.pathname = pathOnly;
+            this.sourceBaseUrl = urlObj.toString(); // This is now the base for media segments
+
+            console.log(`[Buffer] Switched to variant stream (resolving to): ${newUrl}`);
+            console.log(`[Buffer] New media segment base URL: ${this.sourceBaseUrl}`);
+
+            // Re-run the fetch logic immediately with the new media playlist URL
+            this.timeoutId = setTimeout(() => this.fetchManifest(), 100); // Short delay
+            return; // Stop processing the current master playlist
+        }
+
+        // --- Original Logic (for Media Playlists) ---
         if (!playlist.segments || playlist.segments.length === 0) {
-            throw new Error("Source HLS playlist is empty or invalid.");
+            throw new Error("Source HLS playlist is empty or invalid (not a master and no segments found).");
         }
 
         // Get *full URIs* for segments
@@ -483,7 +508,11 @@ class BufferManager {
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
         
         // Find the media sequence of the *first segment we are including*
-        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${bufferedSegments[0].mediaSequence || 0}\n`;
+        // Fallback to 0 if mediaSequence isn't present
+        const firstSegment = bufferedSegments[0];
+        const mediaSequence = firstSegment.mediaSequence || 
+                              (firstSegment.timeline ? firstSegment.timeline : 0); // Use timeline as fallback
+        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}\n`;
 
         for (const segment of bufferedSegments) {
             if (segment.discontinuity) {
@@ -1059,7 +1088,9 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// --- FIX: Listen on 127.0.0.1 (localhost) ---
+// This ensures the app only accepts connections from the Nginx proxy
+// and not directly from the outside world.
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
-
