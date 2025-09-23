@@ -94,69 +94,6 @@
             cursor: not-allowed;
             opacity: 0.5;
         }
-
-        /* --- NEW: Custom Radio Button Styles --- */
-        .radio-label {
-            display: block;
-            position: relative;
-            padding: 1rem;
-            padding-left: 2.5rem;
-            cursor: pointer;
-            border: 2px solid #4b5563; /* gray-600 */
-            border-radius: 0.5rem;
-            transition: all 0.2s ease-in-out;
-            background-color: #374151; /* gray-700 */
-        }
-        .radio-label:hover {
-            border-color: #6b7280; /* gray-500 */
-        }
-        .radio-label input {
-            position: absolute;
-            opacity: 0;
-            cursor: pointer;
-        }
-        .radio-label .radio-title {
-            font-weight: 600;
-            color: #e5e7eb; /* gray-200 */
-            display: block;
-        }
-        .radio-label .radio-desc {
-            font-size: 0.875rem;
-            color: #9ca3af; /* gray-400 */
-            display: block;
-        }
-        .radio-checkmark {
-            position: absolute;
-            top: 50%;
-            left: 1rem;
-            transform: translateY(-50%);
-            height: 20px;
-            width: 20px;
-            background-color: #4b5563; /* gray-600 */
-            border-radius: 50%;
-            border: 2px solid #6b7280; /* gray-500 */
-            transition: all 0.2s ease-in-out;
-        }
-        .radio-label input:checked ~ .radio-checkmark {
-            background-color: #4f46e5; /* indigo-600 */
-            border-color: #4f46e5;
-        }
-        .radio-label input:checked ~ .radio-checkmark:after {
-            content: "";
-            position: absolute;
-            display: block;
-            top: 50%;
-            left: 50%;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: white;
-            transform: translate(-50%, -50%);
-        }
-        .radio-label input:checked + .radio-label-content {
-            border-color: #4f46e5; /* indigo-600 */
-            box-shadow: 0 0 0 2px #4f46e5;
-        }
     </style>
 </head>
 <body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
@@ -246,34 +183,8 @@
 
             <!-- URL Input -->
             <div class="mb-4">
-                <label for="stream-url" class="block text-sm font-medium text-gray-300 mb-2">Source Stream Link (.m3u8 or .mpd)</label>
-                <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your link here...">
-            </div>
-
-            <!-- NEW: Stream Type Selector -->
-            <div class="mb-4">
-                <label class="block text-sm font-medium text-gray-300 mb-2">Stream Type</label>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <!-- LIVE Option -->
-                    <label class="radio-label-content">
-                        <input type="radio" name="stream-type" id="stream-type-live" value="LIVE" checked>
-                        <span class="radio-label">
-                            <span class="radio-title">LIVE</span>
-                            <span class="radio-desc">Use FFmpeg to create a stable, live-edge restream. (For live, unstable, or MPD sources)</span>
-                        </span>
-                        <span class="radio-checkmark"></span>
-                    </label>
-                    
-                    <!-- VOD Option -->
-                    <label class="radio-label-content">
-                        <input type="radio" name="stream-type" id="stream-type-vod" value="VOD">
-                        <span class="radio-label">
-                            <span class="radio-title">VOD (Proxy)</span>
-                            <span class="radio-desc">Directly proxy a VOD .m3u8 for instant, seekable playback. (Source must be a VOD)</span>
-                        </span>
-                        <span class="radio-checkmark"></span>
-                    </label>
-                </div>
+                <label for="stream-url" class="block text-sm font-medium text-gray-300 mb-2">Authenticated Stream Link</label>
+                <input type="text" id="stream-url" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="Paste your .m3u8 or .mpd link here...">
             </div>
 
             <!-- Action Buttons -->
@@ -288,7 +199,7 @@
 
             <!-- Shareable Link -->
             <div class="bg-gray-900 p-4 rounded-lg" id="share-link-box" style="display: none;">
-                <label class="block text-sm font-medium text-gray-400 mb-2" id="share-link-title">Shareable Stream Link (VLC, etc.)</label>
+                <label class="block text-sm font-medium text-gray-400 mb-2">Shareable Stream Link (VLC, etc.)</Vlabel>
                 <div class="flex">
                     <input type="text" id="share-link" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-l-lg text-gray-200 focus:outline-none" readonly>
                     <button id="copy-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-r-lg">Copy</button>
@@ -299,9 +210,9 @@
             <!-- Message Log -->
             <div id="message-log" class="text-center text-gray-400 mt-4 text-sm h-5"></div>
 
-            <!-- Viewer List (Now for LIVE only) -->
+            <!-- Viewer List -->
             <div id="viewer-list-container" class="mt-8" style="display: none;">
-                <h2 class="text-2xl font-bold mb-4 text-indigo-300">Active Viewers (LIVE Only) (<span id="viewer-count">0</span>)</h2>
+                <h2 class="text-2xl font-bold mb-4 text-indigo-300">Active Viewers (<span id="viewer-count">0</span>)</h2>
                 <div class="overflow-hidden rounded-lg shadow-md border border-gray-700">
                     <table id="viewer-table" class="data-table w-full">
                         <thead>
@@ -365,15 +276,15 @@
 
         <!-- 
           ---------------------------------
-          --- TAB 3: SETTINGS (MODIFIED) ---
+          --- TAB 3: SETTINGS (NEW) ---
           ---------------------------------
         -->
         <div id="settings-panel" class="tab-panel space-y-6">
             
-            <!-- Pre-fetch Buffer Settings -->
+            <!-- Idea 1: Pre-fetch Buffer Settings -->
             <div class="bg-gray-900 p-6 rounded-lg border border-gray-700">
-                <h3 class="text-xl font-bold text-indigo-300 mb-2">Pre-fetch Buffer (LIVE Only)</h3>
-                <p class="text-sm text-gray-400 mb-4">Enable this to download LIVE stream segments in advance. This creates a delay but massively improves stability. <strong class="text-yellow-400">Note: Does not work with .mpd (DASH) streams or VOD Proxy mode.</strong></p>
+                <h3 class="text-xl font-bold text-indigo-300 mb-2">Pre-fetch Buffer (Idea 1)</h3>
+                <p class="text-sm text-gray-400 mb-4">Enable this to download stream segments in advance. This creates a delay but massively improves stability on flaky source streams and prevents skips on mobile. <strong class="text-yellow-400">Note: Does not work with .mpd (DASH) streams.</strong></p>
                 <div class="space-y-4">
                     <div class="flex items-center justify-between">
                         <label for="buffer-enabled" class="font-medium text-gray-200">Enable Pre-fetch Buffer</label>
@@ -389,14 +300,14 @@
                 </div>
             </div>
 
-            <!-- FFmpeg Profile Manager (NOW LIVE ONLY) -->
+            <!-- Idea 2: FFmpeg Profile Manager -->
             <div class="bg-gray-900 p-6 rounded-lg border border-gray-700">
-                <h3 class="text-xl font-bold text-indigo-300 mb-2">LIVE FFmpeg Profile Manager</h3>
-                <p class="text-sm text-gray-400 mb-4">Manage FFmpeg profiles used for **LIVE** streams. (VOD Proxy mode does not use profiles).</p>
+                <h3 class="text-xl font-bold text-indigo-300 mb-2">FFmpeg Profile Manager (Idea 2)</h3>
+                <p class="text-sm text-gray-400 mb-4">Select the FFmpeg command to use for transcoding. Add custom profiles to use hardware acceleration (e.g., NVIDIA NVENC).</p>
                 
                 <div class="mb-4">
-                    <label for="active-live-profile-select" class="block text-sm font-medium text-gray-300 mb-2">Active LIVE Profile</label>
-                    <select id="active-live-profile-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"></select>
+                    <label for="active-profile-select" class="block text-sm font-medium text-gray-300 mb-2">Active Stream Profile</label>
+                    <select id="active-profile-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"></select>
                 </div>
                 
                 <div class="flex space-x-3">
@@ -437,7 +348,7 @@
         </div>
     </div>
 
-    <!-- Profile Editor Modal (Unchanged) -->
+    <!-- NEW: Profile Editor Modal -->
     <div id="profile-editor-modal" class="modal-backdrop hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50">
         <div class="modal-content bg-gray-800 rounded-lg shadow-2xl w-full max-w-2xl">
             <form id="profile-editor-form">
@@ -462,7 +373,7 @@
                         </div>
                     </div>
                 </div>
-                <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4">
+                <div class="bg-gray-700/50 px-6 py-4 flex justify-end gap-4 rounded-b-lg">
                     <button type="button" id="modal-cancel-profile-btn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md">Cancel</button>
                     <button type="submit" id="modal-save-profile-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Save Profile</button>
                 </div>
@@ -483,14 +394,14 @@
             username: ''
         };
         let pendingConfirmAction = null; 
-        // --- MODIFIED: Global settings cache ---
+        // NEW: Global settings cache
         let globalSettings = {
             buffer: {
                 enabled: false,
                 delaySeconds: 30
             },
-            liveProfiles: [], // Renamed from profiles
-            activeLiveProfileId: null // Renamed from activeProfileId
+            profiles: [],
+            activeProfileId: null
         };
 
         // --- Auth UI Elements ---
@@ -526,12 +437,9 @@
         const statusText = document.getElementById('status-text');
         const shareLinkBox = document.getElementById('share-link-box');
         const shareLink = document.getElementById('share-link');
-        const shareLinkTitle = document.getElementById('share-link-title'); // --- NEW ---
         const copyBtn = document.getElementById('copy-btn');
         const copyFeedback = document.getElementById('copy-feedback');
         const messageLog = document.getElementById('message-log');
-        const streamTypeLiveRadio = document.getElementById('stream-type-live'); // --- NEW ---
-        const streamTypeVodRadio = document.getElementById('stream-type-vod'); // --- NEW ---
         
         // --- Viewer List UI Elements ---
         const viewerListContainer = document.getElementById('viewer-list-container');
@@ -554,19 +462,19 @@
         const modalCancelBtn = document.getElementById('modal-cancel-btn');
         const modalConfirmBtn = document.getElementById('modal-confirm-btn');
 
-        // --- MODIFIED: Settings Panel UI Elements ---
+        // --- NEW: Settings Panel UI Elements ---
         const saveSettingsBtn = document.getElementById('save-settings-btn');
         const settingsMessageLog = document.getElementById('settings-message-log');
         // Buffer
         const bufferEnabledInput = document.getElementById('buffer-enabled');
         const bufferDelayInput = document.getElementById('buffer-delay');
-        // Profiles (Renamed)
-        const activeProfileSelect = document.getElementById('active-live-profile-select'); // Renamed ID
+        // Profiles
+        const activeProfileSelect = document.getElementById('active-profile-select');
         const addProfileBtn = document.getElementById('add-profile-btn');
         const editProfileBtn = document.getElementById('edit-profile-btn');
         const deleteProfileBtn = document.getElementById('delete-profile-btn');
 
-        // --- Profile Editor Modal UI Elements (Unchanged) ---
+        // --- NEW: Profile Editor Modal UI Elements ---
         const profileEditorModal = document.getElementById('profile-editor-modal');
         const profileEditorForm = document.getElementById('profile-editor-form');
         const profileModalTitle = document.getElementById('profile-modal-title');
@@ -578,10 +486,11 @@
         const modalCancelProfileBtn = document.getElementById('modal-cancel-profile-btn');
 
 
-        // --- REMOVED: Static publicStreamUrl ---
-        // shareLink.value is now set dynamically in updateStatus()
+        // Set public stream URL
+        const publicStreamUrl = `http://${window.location.hostname}:8994/live.m3u8`;
+        shareLink.value = publicStreamUrl;
 
-        // --- General Message Loggers (Unchanged) ---
+        // --- General Message Loggers ---
         function logAuthMessage(message, isError = true) {
             authMessageLog.textContent = message;
             authMessageLog.className = isError 
@@ -614,14 +523,16 @@
             setTimeout(() => { settingsMessageLog.textContent = ''; }, 4000);
         }
 
-        // --- UI State Management (Unchanged) ---
+        // --- UI State Management ---
         function showLoginPanel(hasUsers) {
             if (hasUsers) {
+                // Normal login
                 authTitle.textContent = 'Login';
                 authSubtitle.textContent = 'Welcome back. Please log in to continue.';
                 authBtn.textContent = 'Login';
                 firstRunMessage.classList.add('hidden');
             } else {
+                // First-run registration
                 authTitle.textContent = 'Create Admin Account';
                 authSubtitle.textContent = 'This will be the primary admin account.';
                 authBtn.textContent = 'Register';
@@ -636,9 +547,12 @@
             authContainer.style.display = 'none';
             appContainer.style.display = 'block';
             
+            // On login, always default to stream tab and fetch status
             showTab('stream-panel');
             checkStatus(); 
+            // Also pre-fetch the user list for the other tab
             fetchUsers();
+            // And pre-load settings
             loadSettingsAndProfiles();
         }
 
@@ -661,6 +575,7 @@
                 activeTab.classList.remove('inactive');
             }
 
+            // Load data when switching to a data-heavy tab
             if (tabId === 'users-panel') {
                 fetchUsers();
             } else if (tabId === 'settings-panel') {
@@ -668,7 +583,8 @@
             }
         }
 
-        // --- Auth API Functions (Unchanged) ---
+        // --- Auth API Functions ---
+
         async function checkAuthStatus() {
             try {
                 const response = await fetch(`${apiUrl}/auth/check`);
@@ -686,7 +602,7 @@
             } catch (error) {
                 console.error('Failed to check auth status:', error);
                 logAuthMessage('Cannot connect to server.');
-                showLoginPanel(true);
+                showLoginPanel(true); // Default to login if server check fails
             }
         }
 
@@ -755,6 +671,7 @@
 
 
         // --- User Management API Functions ---
+
         async function fetchUsers() {
             try {
                 const response = await fetchWithAuth(`${apiUrl}/users`);
@@ -817,12 +734,10 @@
                 } else {
                     logUserMessage(data.error || 'Failed to create user', true);
                 }
-            // --- FIX: Added missing braces ---
             } catch (error) {
                 console.error('Error adding user:', error);
                 logUserMessage(error.message, true);
             }
-            // --- END FIX ---
         }
 
         async function handleDeleteUser(userId, username) {
@@ -844,10 +759,9 @@
         }
 
 
-        // --- Stream Control API Functions (MODIFIED) ---
+        // --- Stream Control API Functions ---
 
-        // --- MODIFIED: updateStatus now handles "LIVE" vs "VOD" ---
-        function updateStatus(running, url = "", type = "NONE") {
+        function updateStatus(running, url = "") {
             if (running) {
                 statusIndicator.classList.remove('border-red-500');
                 statusIndicator.classList.add('border-green-500');
@@ -855,36 +769,13 @@
                 statusIndicator.style.background = 'rgba(34, 197, 94, 0.1)';
                 statusDot.classList.remove('bg-red-500');
                 statusDot.classList.add('bg-green-500');
-                streamUrlInput.value = url;
+                statusText.textContent = 'Stream is LIVE';
                 shareLinkBox.style.display = 'block';
-
-                if (type === "LIVE") {
-                    statusText.textContent = 'Stream is LIVE (FFmpeg)';
-                    // Set LIVE share link (Nginx)
-                    const liveStreamUrl = `http://${window.location.hostname}:8994/live.m3u8`;
-                    shareLink.value = liveStreamUrl;
-                    shareLinkTitle.textContent = "Shareable LIVE Link (Nginx, port 8994)";
-
-                    // Show viewer list and start checking
-                    viewerListContainer.style.display = 'block';
-                    startViewerCheck();
-                    fetchViewers();
-                    streamTypeLiveRadio.checked = true;
-
-                } else if (type === "VOD") {
-                    statusText.textContent = 'Stream is LIVE (VOD Proxy)';
-                    // Set VOD share link (Node.js)
-                    const vodStreamUrl = `http://${window.location.hostname}:8995/stream/live.m3u8`;
-                    shareLink.value = vodStreamUrl;
-                    shareLinkTitle.textContent = "Shareable VOD Link (Proxy, port 8995)";
-
-                    // Hide viewer list and stop checking
-                    viewerListContainer.style.display = 'none';
-                    stopViewerCheck();
-                    clearViewerTable();
-                    streamTypeVodRadio.checked = true;
-                }
+                streamUrlInput.value = url;
                 
+                viewerListContainer.style.display = 'block';
+                startViewerCheck();
+                fetchViewers();
             } else {
                 statusIndicator.classList.remove('border-green-500');
                 statusIndicator.classList.add('border-red-500');
@@ -901,13 +792,12 @@
             }
         }
 
-        // --- MODIFIED: checkStatus now uses "type" ---
         async function checkStatus() {
             if (!authState.isLoggedIn) return; 
             try {
                 const response = await fetchWithAuth(`${apiUrl}/status`);
                 const data = await response.json();
-                updateStatus(data.running, data.url, data.type);
+                updateStatus(data.running, data.url);
             } catch (error) {
                 console.error('Failed to check status:', error);
                 logStreamMessage(error.message, true);
@@ -915,28 +805,23 @@
             }
         }
 
-        // --- MODIFIED: handleStartStream now sends "type" ---
         async function handleStartStream() {
             const url = streamUrlInput.value;
             if (!url) {
                 logStreamMessage('Please paste the stream link first', true);
                 return;
             }
-            
-            // --- NEW: Get selected stream type ---
-            const streamType = document.querySelector('input[name="stream-type"]:checked').value;
 
             try {
                 const response = await fetchWithAuth(`${apiUrl}/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    // --- NEW: Send both url and type ---
-                    body: JSON.stringify({ url, type: streamType }) 
+                    body: JSON.stringify({ url })
                 });
                 const data = await response.json();
                 if (response.ok) {
-                    logStreamMessage(`Stream started (${streamType})!`, false);
-                    updateStatus(true, url, streamType);
+                    logStreamMessage('Stream started!', false);
+                    updateStatus(true, url);
                 } else {
                     logStreamMessage(data.error || 'Failed to start stream', true);
                 }
@@ -966,6 +851,7 @@
         function handleCopy() {
             shareLink.select();
             try {
+                // Use execCommand as a fallback for iframe/secure contexts
                 document.execCommand('copy');
                 copyFeedback.style.display = 'block';
                 setTimeout(() => { copyFeedback.style.display = 'none'; }, 2000);
@@ -975,7 +861,8 @@
             }
         }
 
-        // --- Viewer List Functions (Unchanged, but now only called for LIVE) ---
+        // --- Viewer List Functions ---
+
         function formatTimeAgo(timestamp) {
             const now = Date.now();
             const seconds = Math.floor((now - timestamp) / 1000);
@@ -1061,7 +948,7 @@
             }
         }
 
-        // --- Modal Functions (Unchanged) ---
+        // --- Modal Functions ---
         function showModal(modalElement) {
             modalElement.classList.remove('hidden');
             modalElement.classList.add('visible');
@@ -1079,7 +966,7 @@
             showModal(modal);
         }
 
-        // --- MODIFIED: Settings & Profile Functions ---
+        // --- NEW: Settings & Profile Functions ---
 
         // Fetches ALL settings from the server and caches them
         async function loadSettingsAndProfiles() {
@@ -1092,8 +979,8 @@
                 bufferEnabledInput.checked = globalSettings.buffer.enabled;
                 bufferDelayInput.value = globalSettings.buffer.delaySeconds;
                 
-                // --- MODIFIED: Populate LIVE Profiles UI ---
-                populateProfileSelect(globalSettings.liveProfiles, globalSettings.activeLiveProfileId);
+                // Populate Profiles UI
+                populateProfileSelect(globalSettings.profiles, globalSettings.activeProfileId);
 
             } catch (error) {
                 logSettingsMessage(error.message, true);
@@ -1108,7 +995,7 @@
                 globalSettings.buffer.delaySeconds = parseInt(bufferDelayInput.value, 10) || 30;
 
                 // 2. Read active profile ID from dropdown into global cache
-                globalSettings.activeLiveProfileId = activeProfileSelect.value; // Renamed
+                globalSettings.activeProfileId = activeProfileSelect.value;
                 
                 // 3. (Profile array is already updated in the cache by the editor functions)
 
@@ -1121,8 +1008,7 @@
                 
                 if (response.ok) {
                     globalSettings = data; // Re-sync with the saved version
-                    // --- MODIFIED ---
-                    populateProfileSelect(globalSettings.liveProfiles, globalSettings.activeLiveProfileId);
+                    populateProfileSelect(globalSettings.profiles, globalSettings.activeProfileId);
                     logSettingsMessage('Settings saved successfully!', false);
                 } else {
                     logSettingsMessage(data.error || 'Failed to save settings', true);
@@ -1150,8 +1036,7 @@
         // Enables/disables edit/delete buttons based on selection
         function updateProfileButtonStates() {
             const selectedId = activeProfileSelect.value;
-            // --- MODIFIED ---
-            const selectedProfile = globalSettings.liveProfiles.find(p => p.id === selectedId);
+            const selectedProfile = globalSettings.profiles.find(p => p.id === selectedId);
             
             if (!selectedProfile) {
                 editProfileBtn.disabled = true;
@@ -1159,7 +1044,7 @@
                 return;
             }
 
-            // You can't delete defaults
+            // You can edit defaults, but you can't delete them
             editProfileBtn.disabled = false;
             deleteProfileBtn.disabled = selectedProfile.isDefault === true;
         }
@@ -1169,7 +1054,7 @@
             profileEditorForm.reset();
             if (profile) {
                 // Editing existing profile
-                profileModalTitle.textContent = 'Edit LIVE Profile';
+                profileModalTitle.textContent = 'Edit Profile';
                 profileIdInput.value = profile.id;
                 profileIsDefaultInput.value = profile.isDefault || false;
                 profileNameInput.value = profile.name;
@@ -1191,7 +1076,7 @@
 
             } else {
                 // Creating new profile
-                profileModalTitle.textContent = 'Add New LIVE Profile';
+                profileModalTitle.textContent = 'Add New Profile';
                 profileIdInput.value = `custom-${Date.now()}`; // New unique ID
                 profileIsDefaultInput.value = false;
                 
@@ -1209,6 +1094,7 @@
             const isDefault = profileIsDefaultInput.value === 'true';
 
             if (isDefault) {
+                // This shouldn't happen since button is disabled, but as a safeguard
                 hideModal(profileEditorModal);
                 return;
             }
@@ -1220,17 +1106,20 @@
                 isDefault: false
             };
 
-            // --- MODIFIED ---
-            const existingIndex = globalSettings.liveProfiles.findIndex(p => p.id === profileId);
+            // Find if this profile already exists to update it, or add if new
+            const existingIndex = globalSettings.profiles.findIndex(p => p.id === profileId);
             if (existingIndex > -1) {
-                globalSettings.liveProfiles[existingIndex] = newProfileData;
+                // Update existing
+                globalSettings.profiles[existingIndex] = newProfileData;
             } else {
-                globalSettings.liveProfiles.push(newProfileData);
+                // Add new
+                globalSettings.profiles.push(newProfileData);
             }
             
-            globalSettings.activeLiveProfileId = newProfileData.id;
-            // --- END MODIFIED ---
+            // Set the new/edited profile as the active one
+            globalSettings.activeProfileId = newProfileData.id;
 
+            // Now, save the *entire* settings object (which includes the updated profiles array) to server
             saveAllSettings(); // This function also re-populates the select box
             hideModal(profileEditorModal);
         }
@@ -1238,8 +1127,7 @@
         // Deletes the selected profile from the globalSettings cache
         function deleteSelectedProfile() {
             const selectedId = activeProfileSelect.value;
-            // --- MODIFIED ---
-            const selectedProfile = globalSettings.liveProfiles.find(p => p.id === selectedId);
+            const selectedProfile = globalSettings.profiles.find(p => p.id === selectedId);
 
             if (!selectedProfile || selectedProfile.isDefault) {
                 logSettingsMessage('Cannot delete a default profile.', true);
@@ -1250,30 +1138,35 @@
                 title: 'Delete Profile',
                 message: `Are you sure you want to delete profile <strong class="text-red-400">${selectedProfile.name}</strong>?`,
                 onConfirm: () => {
-                    // --- MODIFIED ---
-                    globalSettings.liveProfiles = globalSettings.liveProfiles.filter(p => p.id !== selectedId);
+                    // Filter the profile out of the array
+                    globalSettings.profiles = globalSettings.profiles.filter(p => p.id !== selectedId);
                     
-                    const firstDefault = globalSettings.liveProfiles.find(p => p.isDefault);
-                    globalSettings.activeLiveProfileId = firstDefault ? firstDefault.id : (globalSettings.liveProfiles[0] ? globalSettings.liveProfiles[0].id : null);
-                    // --- END MODIFIED ---
+                    // --- FIX: Robustly find the next profile to select ---
+                    const firstDefault = globalSettings.profiles.find(p => p.isDefault);
+                    globalSettings.activeProfileId = firstDefault ? firstDefault.id : (globalSettings.profiles[0] ? globalSettings.profiles[0].id : null);
                     
+                    // Save the entire updated settings object
                     saveAllSettings(); // This also refreshes the select box
                 }
             });
         }
 
 
-        // --- Generic Authed Fetch Wrapper (Unchanged) ---
+        // --- Generic Authed Fetch Wrapper ---
+        // Wraps fetch() and handles 401 Unauthorized errors automatically
         async function fetchWithAuth(url, options = {}) {
             const response = await fetch(url, options);
 
             if (response.status === 401) {
+                // Unauthorized! Session likely expired.
                 logAuthMessage('Session expired. Please log in again.');
-                await handleLogout();
+                await handleLogout(); // This will reset the UI to the login screen
+                // Throw an error to stop the original function from continuing
                 throw new Error('Session expired');
             }
 
             if (!response.ok) {
+                // Pass other errors (like 400, 404, 500) up the chain
                 try {
                     const data = await response.json();
                     throw new Error(data.error || `Server error: ${response.status}`);
@@ -1281,7 +1174,8 @@
                      throw new Error(`Server error: ${response.status} - ${response.statusText}`);
                 }
             }
-            return response;
+
+            return response; // Return the successful response
         }
         
         // --- Event Listeners ---
@@ -1339,16 +1233,15 @@
             hideModal(modal);
         });
 
-        // --- MODIFIED: Settings Panel Listeners ---
+        // --- NEW: Settings Panel Listeners ---
         saveSettingsBtn.addEventListener('click', saveAllSettings);
-        activeProfileSelect.addEventListener('change', updateProfileButtonStates); // Now points to active-live-profile-select
+        activeProfileSelect.addEventListener('change', updateProfileButtonStates);
 
         // Profile Editor
         addProfileBtn.addEventListener('click', () => openProfileEditor(null));
         editProfileBtn.addEventListener('click', () => {
             const selectedId = activeProfileSelect.value;
-            // --- MODIFIED ---
-            const profile = globalSettings.liveProfiles.find(p => p.id === selectedId);
+            const profile = globalSettings.profiles.find(p => p.id === selectedId);
             if (profile) openProfileEditor(profile);
         });
         deleteProfileBtn.addEventListener('click', deleteSelectedProfile);
@@ -1362,9 +1255,7 @@
         authContainer.style.display = 'block';
         document.addEventListener('DOMContentLoaded', checkAuthStatus);
         
-        // --- MODIFIED: checkStatus now runs on a shorter interval for faster UI updates ---
-        setInterval(checkStatus, 5000); 
+        setInterval(checkStatus, 10000);
     </script>
 </body>
 </html>
-
