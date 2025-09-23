@@ -9,11 +9,11 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 
 // --- NEW DEPENDENCIES ---
+// We need axios for reliable HTTP requests (to download segments) and m3u8-parser
 const axios = require('axios');
-const { Parser: HlsParser } = require('m3u8-parser');
-// --- NEW: MPD (DASH) Parser ---
-const { parse: MpdParser, stringify: MpdStringify } = require('@eyevinn/mpd-parser');
-
+const { Parser: HlsParser } = require('m3u8-parser'); // Renamed to HlsParser for clarity
+// --- FIX #2: Corrected package name ---
+const mpdParser = require('mpd-parser'); // Removed @eyevinn/
 
 const app = express();
 const port = 3000;
@@ -25,7 +25,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- DB Setup ---
 const DATA_DIR = '/data'; // This is the persistent volume mounted by Docker
 const DB_PATH = path.join(DATA_DIR, 'restream.db');
-const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
+const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json'); // --- NEW: Settings file ---
 let db;
 
 try {
@@ -36,6 +36,7 @@ try {
     db = new sqlite3.Database(DB_PATH, (err) => {
         if (err) {
             console.error('Error opening database:', err.message);
+            // If the DB can't be opened, the app is useless.
             process.exit(1);
         } else {
             console.log('Connected to the SQLite database.');
@@ -82,7 +83,7 @@ const isAuthenticated = (req, res, next) => {
 };
 
 // ================================================================
-// --- SETTINGS MANAGEMENT ---
+// --- NEW: SETTINGS MANAGEMENT ---
 // ================================================================
 
 function getDefaultSettings() {
@@ -90,18 +91,19 @@ function getDefaultSettings() {
         profiles: [
             {
                 id: 'default-cpu',
-                name: 'Default (CPU Stream Copy - HLS Only)',
+                name: 'Default (CPU Stream Copy - HLS Only)', // Renamed for clarity
                 command: '-user_agent "{userAgent}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i "{streamUrl}" -c copy -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
                 active: true,
-                isDefault: true
+                isDefault: true // --- FIX: Add isDefault flag
             },
             {
                 id: 'nvidia-gpu',
-                name: 'NVIDIA (NVENC Re-encode - HLS Only)',
+                name: 'NVIDIA (NVENC Re-encode - HLS Only)', // Renamed for clarity
                 command: '-hwaccel nvdec -user_agent "{userAgent}" -i "{streamUrl}" -c:a copy -c:v h264_nvenc -preset p6 -tune hq -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments+discont_start+omit_endlist -hls_segment_filename /var/www/hls/segment_%03d.ts /var/www/hls/live.m3u8',
                 active: false,
-                isDefault: true
+                isDefault: true // --- FIX: Add isDefault flag
             },
+            // --- NEW: MPD/DASH Profiles based on user logs ---
             {
                 id: 'mpd-1080p-copy',
                 name: 'MPD/DASH 1080p (Stream Copy)',
@@ -148,6 +150,7 @@ function getSettings() {
         const settingsData = fs.readFileSync(SETTINGS_PATH, 'utf8');
         let settings = JSON.parse(settingsData);
 
+        // --- NEW: Migration logic to add isDefault flag to old profiles ---
         let needsSave = false;
         if (settings.profiles && settings.profiles.length > 0) {
             const defaultIds = ['default-cpu', 'nvidia-gpu', 'mpd-1080p-copy', 'mpd-720p-copy', 'mpd-1080p-nvenc'];
@@ -165,6 +168,7 @@ function getSettings() {
             console.log('Migrating settings to include isDefault flag...');
             saveSettings(settings);
         }
+        // --- End Migration ---
 
         return settings;
     } catch (e) {
@@ -187,16 +191,21 @@ function saveSettings(settings) {
 
 function getActiveProfile() {
     const settings = getSettings();
+    // --- MODIFIED: Find active profile by ID from settings ---
     let activeProfile = settings.profiles.find(p => p.id === settings.activeProfileId);
     if (!activeProfile) {
+        // Fallback if activeId is invalid or not set
         activeProfile = settings.profiles.find(p => p.active === true);
     }
     if (!activeProfile) {
+        // Fallback to first profile
         activeProfile = settings.profiles[0];
     }
-    return activeProfile || getDefaultSettings().profiles[0];
+    return activeProfile || getDefaultSettings().profiles[0]; // Absolute fallback
 }
 
+
+// --- NEW: Settings & Profiles API Endpoints (Protected) ---
 
 app.get('/api/settings', isAuthenticated, (req, res) => {
     res.json(getSettings());
@@ -208,23 +217,29 @@ app.post('/api/settings', isAuthenticated, (req, res) => {
         return res.status(400).json({ error: 'Invalid settings object.' });
     }
 
+    // --- MODIFIED: We now save the *ID* of the active profile ---
+    // The 'active' boolean on the profile itself is deprecated, but we keep
+    // it for one last check to find the ID.
     let activeId = newSettings.activeProfileId;
     if (!activeId) {
         const activeProfile = newSettings.profiles.find(p => p.active === true);
         activeId = activeProfile ? activeProfile.id : newSettings.profiles[0]?.id;
     }
     
+    // Ensure the activeId is valid
     if (!newSettings.profiles.find(p => p.id === activeId)) {
-        activeId = newSettings.profiles[0]?.id;
+        activeId = newSettings.profiles[0]?.id; // Default to first if not found
     }
     
     newSettings.activeProfileId = activeId;
     
+    // Clean up old 'active' flags (they are no longer the source of truth)
     newSettings.profiles.forEach(p => {
         p.active = (p.id === activeId);
     });
     
     if (saveSettings(newSettings)) {
+        // --- FIX: Return the full settings object so the UI stays in sync ---
         res.json(newSettings);
     } else {
         res.status(500).json({ error: 'Failed to save settings to disk.' });
@@ -239,57 +254,64 @@ app.post('/api/settings', isAuthenticated, (req, res) => {
 
 let ffmpegProcess = null;
 let currentStreamUrl = "";
-let bufferManager = null;
+let bufferManager = null; // --- NEW: Handle for the buffer manager
 const HLS_LOG_PATH = '/var/log/nginx/hls_access.log';
 const BLOCKLIST_PATH = '/etc/nginx/blocklist.conf';
 const VIEWER_TIMEOUT_MS = 15 * 1000;
+const HLS_DIR = '/var/www/hls'; // Main Nginx serve directory
+const BUFFER_DIR = path.join(HLS_DIR, 'buffer'); // Subdirectory for segments
 
+// Function to reload nginx config
 function reloadNginx() {
     exec('supervisorctl -c /etc/supervisor/conf.d/supervisord.conf signal HUP nginx', (err, stdout, stderr) => {
-        if (err) console.error('Failed to reload nginx:', stderr);
-        else console.log('Nginx reloaded successfully.');
+        if (err) console.error('[Nginx] Failed to reload nginx:', stderr);
+        else console.log('[Nginx] Reloaded successfully.');
     });
 }
 
-// Function to clean up all HLS/DASH files and local playlists
+// Function to clean up all HLS files and local playlists
 function cleanupHlsFiles() {
-    console.log('[Cleanup] All HLS/DASH segments and manifests cleared.');
+    console.log('[Cleanup] Clearing all temporary stream files...');
     try {
-        // Delete main nginx-served HLS playlist
-        if (fs.existsSync('/var/www/hls/live.m3u8')) {
-            fs.unlinkSync('/var/www/hls/live.m3u8');
-            console.log('[Cleanup] Removed /var/www/hls/live.m3u8');
-        }
-        // Delete all .ts segments
-        fs.readdirSync('/var/www/hls').forEach(file => {
-            if (file.endsWith('.ts')) {
-                fs.unlinkSync(path.join('/var/www/hls', file));
+        // Delete main nginx-served playlist
+        const filesToDelete = [
+            'live.m3u8',
+            'local_playlist.m3u8',
+            'local_manifest.mpd'
+        ];
+
+        fs.readdirSync(HLS_DIR).forEach(file => {
+            if (file.endsWith('.ts') || filesToDelete.includes(file)) {
+                try {
+                    fs.unlinkSync(path.join(HLS_DIR, file));
+                    console.log(`[Cleanup] Deleted: ${file}`);
+                } catch (e) {
+                    console.warn(`[Cleanup] Failed to delete file ${file}: ${e.message}`);
+                }
             }
         });
-        // Delete our internally generated local HLS playlist
-        if (fs.existsSync('/var/www/hls/local_playlist.m3u8')) {
-            fs.unlinkSync('/var/www/hls/local_playlist.m3u8');
-            console.log('[Cleanup] Removed /var/www/hls/local_playlist.m3u8');
+
+        // Also ensure the buffer directory is gone
+        if (fs.existsSync(BUFFER_DIR)) {
+            fs.rmSync(BUFFER_DIR, { recursive: true, force: true });
+            console.log('[Cleanup] Deleted buffer directory.');
         }
-        // --- NEW: Delete internally generated local MPD manifest ---
-        if (fs.existsSync('/var/www/hls/local_manifest.mpd')) {
-            fs.unlinkSync('/var/www/hls/local_manifest.mpd');
-            console.log('[Cleanup] Removed /var/www/hls/local_manifest.mpd');
-        }
+
     } catch (e) {
-        console.error('[Cleanup] Error during HLS/DASH file cleanup:', e.message);
+        console.error('[Cleanup] Error during HLS file cleanup:', e.message);
     }
 }
 
 // Function to stop all streaming processes
 function stopAllStreamProcesses() {
-    console.log('Stopping all stream processes...');
+    console.log('[Stream Stop] Stopping all stream processes...');
     if (bufferManager) {
         bufferManager.stop();
         bufferManager = null;
     }
     if (ffmpegProcess) {
-        ffmpegProcess.kill('SIGKILL');
+        // Use SIGKILL to ensure the process is terminated immediately
+        ffmpegProcess.kill('SIGKILL'); 
         ffmpegProcess = null;
     }
     currentStreamUrl = "";
@@ -304,31 +326,36 @@ function stopAllStreamProcesses() {
 class BufferManager {
     constructor(sourceUrl, bufferSeconds) {
         this.sourceUrl = sourceUrl;
-        this.bufferDir = path.join('/var/www/hls', 'buffer');
-        this.localHlsPlaylistPath = path.join('/var/www/hls', 'local_playlist.m3u8');
-        this.localMpdManifestPath = path.join('/var/www/hls', 'local_manifest.mpd');
-        
-        this.targetBufferSegments = Math.max(1, Math.floor(bufferSeconds / 4)); // For HLS
-        this.streamType = 'unknown'; // 'hls' or 'mpd'
-        
-        // --- MODIFIED: segmentQueue is now an array of objects: { url, filename } ---
-        this.segmentQueue = [];
-        this.downloadedSegments = new Set(); // Stores filenames
-        this.segmentBaseUrl = '';
+        this.sourceBaseUrl = ''; // Base URL for relative segment paths
+        this.bufferDir = BUFFER_DIR;
         this.stopFlag = false;
         this.timeoutId = null;
-        this.initialPlaylistReady = null;
+        this.downloadedSegments = new Set(); // Tracks filenames we have
+        this.initialPlaylistReady = null; // Promise for race condition
         this.resolveInitialPlaylist = null;
         this.rejectInitialPlaylist = null;
+
+        // --- Type-specific properties ---
+        this.streamType = this.sourceUrl.includes('.mpd') ? 'mpd' : 'hls';
+        this.localManifestPath = ''; // Path to the manifest we generate
+        
+        // HLS properties
+        this.targetBufferSegments = Math.max(3, Math.floor(bufferSeconds / 4)); // Avg 4s segments
+        
+        // MPD properties
+        this.mpdManifest = null; // To store the parsed MPD manifest
+        this.segmentUrls = []; // A flat list of ALL segment URLs to fetch
+
+        console.log(`[Buffer] Manager started for ${this.streamType.toUpperCase()} stream.`);
+        console.log(`[Buffer] Target buffer: ~${bufferSeconds} seconds.`);
 
         // Ensure buffer directory exists and is clean
         try {
             if (fs.existsSync(this.bufferDir)) {
-                console.log(`[Buffer] Clearing existing buffer directory: ${this.bufferDir}`);
                 fs.rmSync(this.bufferDir, { recursive: true, force: true });
             }
             fs.mkdirSync(this.bufferDir, { recursive: true });
-            console.log(`[Buffer] Created new buffer directory: ${this.bufferDir}`);
+            console.log('[Buffer] Created clean buffer directory at:', this.bufferDir);
         } catch (e) {
             console.error('[Buffer] Failed to create or clean buffer directory:', e);
         }
@@ -343,14 +370,10 @@ class BufferManager {
             this.rejectInitialPlaylist = reject;
         });
 
-        // --- NEW: Detect stream type ---
-        if (this.sourceUrl.endsWith('.mpd') || this.sourceUrl.includes('.mpd?')) {
-            this.streamType = 'mpd';
-            console.log(`[Buffer] Manager started for MPD. Target buffer: ${this.targetBufferSegments * 4}s.`);
-        } else {
-            this.streamType = 'hls';
-            console.log(`[Buffer] Manager started for HLS. Target buffer: ${this.targetBufferSegments} segments.`);
-        }
+        // Set the base URL for resolving relative segment paths
+        const urlObj = new URL(this.sourceUrl);
+        urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+        this.sourceBaseUrl = urlObj.toString();
 
         this.fetchManifest(); // Start the loop
         return this.initialPlaylistReady; // Return the promise
@@ -362,41 +385,38 @@ class BufferManager {
             clearTimeout(this.timeoutId);
         }
         console.log('[Buffer] Manager stopped.');
+        
         // Clean up temporary buffer dir on stop
+        console.log('[Buffer] Cleaning up buffer directory on stop...');
         try {
             if (fs.existsSync(this.bufferDir)) {
-                console.log(`[Buffer] Deleting buffer directory on stop: ${this.bufferDir}`);
                 fs.rmSync(this.bufferDir, { recursive: true, force: true });
+                console.log('[Buffer] Buffer directory deleted.');
             }
         } catch (e) {
-            console.error('[Buffer] Failed to delete buffer directory on stop:', e);
+            console.error('[Buffer] Failed to delete buffer directory on stop:', e.message);
         }
     }
 
     /**
-     * Generic manifest fetcher that routes to HLS or MPD logic
+     * Main loop, fetches the appropriate manifest.
      */
     async fetchManifest() {
         if (this.stopFlag) return;
 
         try {
-            let refreshInterval = 2000; // Default refresh
-            
             if (this.streamType === 'hls') {
-                refreshInterval = await this.fetchHlsPlaylist();
-            } else if (this.streamType === 'mpd') {
-                refreshInterval = await this.fetchMpdManifest();
+                await this.fetchHlsManifest();
+            } else {
+                await this.fetchMpdManifest();
             }
-
-            // Schedule the next fetch
-            this.timeoutId = setTimeout(() => this.fetchManifest(), refreshInterval);
-
         } catch (error) {
-            console.error(`[Buffer] Error fetching source ${this.streamType} manifest:`, error.message);
+            console.error(`[Buffer] Error fetching source ${this.streamType} manifest:`, error.message || error);
             if (!this.stopFlag) {
-                this.timeoutId = setTimeout(() => this.fetchManifest(), 2000); // Retry faster on error
+                // Retry faster on error
+                this.timeoutId = setTimeout(() => this.fetchManifest(), 2000); 
             }
-            // If we fail *before* the first playlist is ready, reject the promise
+            // FIX: If we fail *before* the first playlist is ready, reject the promise
             if (this.rejectInitialPlaylist) {
                 this.rejectInitialPlaylist(error);
                 this.rejectInitialPlaylist = null;
@@ -405,11 +425,13 @@ class BufferManager {
         }
     }
 
-    /**
-     * Fetches and processes an HLS (.m3u8) playlist.
-     * Returns the recommended refresh interval.
-     */
-    async fetchHlsPlaylist() {
+    // -------------------------------------------------
+    // --- HLS (.m3u8) Specific Logic ---
+    // -------------------------------------------------
+
+    async fetchHlsManifest() {
+        this.localManifestPath = path.join(HLS_DIR, 'local_playlist.m3u8');
+        
         const response = await axios.get(this.sourceUrl, { timeout: 3000 });
         const parser = new HlsParser();
         parser.push(response.data);
@@ -417,265 +439,257 @@ class BufferManager {
 
         const playlist = parser.manifest;
         if (!playlist.segments || playlist.segments.length === 0) {
-            console.warn('[Buffer-HLS] Source playlist is empty or invalid.');
-            if (this.rejectInitialPlaylist) {
-                this.rejectInitialPlaylist(new Error("Source HLS playlist is empty or invalid."));
-                this.rejectInitialPlaylist = null;
-            }
-            throw new Error("Empty or invalid HLS playlist");
+            throw new Error("Source HLS playlist is empty or invalid.");
         }
 
-        // Determine the base URL for segments (relative vs absolute)
-        const firstSegmentUri = playlist.segments[0].uri;
-        if (firstSegmentUri.startsWith('http')) {
-            this.segmentBaseUrl = ''; // Segments have full URLs
-        } else {
-            const urlObj = new URL(this.sourceUrl);
-            urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
-            this.segmentBaseUrl = urlObj.toString();
-        }
-
-        // --- MODIFIED: Update segmentQueue with { url, filename } objects ---
-        this.segmentQueue = playlist.segments.map(s => {
-            const filename = s.uri.split('/').pop();
-            const url = this.segmentBaseUrl ? new URL(s.uri, this.segmentBaseUrl).href : s.uri;
-            return { url, filename };
-        });
+        // Get *full URIs* for segments
+        const segments = playlist.segments.map(s => ({
+            ...s,
+            fullUri: new URL(s.uri, this.sourceBaseUrl).href,
+            filename: s.uri.split('/').pop().split('?')[0] // Get clean filename
+        }));
 
         // Start downloading segments from the queue
-        this.downloadSegments();
+        this.downloadSegments(segments); 
+        
         // Write the local playlist for FFmpeg to read from
-        this.writeLocalHlsPlaylist(playlist);
+        this.writeLocalHlsPlaylist(playlist, segments);
 
-        // Resolve the promise only AFTER the first playlist is written
+        // Resolve the promise if this is the first successful run
         if (this.resolveInitialPlaylist) {
-            console.log('[Buffer-HLS] Initial HLS playlist is ready.');
-            this.resolveInitialPlaylist({ localManifestPath: this.localHlsPlaylistPath });
-            this.resolveInitialPlaylist = null;
+            console.log('[Buffer] Initial HLS playlist is ready.');
+            this.resolveInitialPlaylist({ localManifestPath: this.localManifestPath });
+            this.resolveInitialPlaylist = null; 
             this.rejectInitialPlaylist = null;
         }
 
-        // Clean up old segments
-        this.cleanupOldSegments();
-        
-        // Return refresh interval
-        return (playlist.segments[0].duration || 4) * 1000 / 2; // Refresh at half duration
+        // Schedule the next fetch
+        const refreshInterval = (playlist.targetDuration || 4) * 1000;
+        this.timeoutId = setTimeout(() => this.fetchManifest(), refreshInterval / 2);
     }
 
-    /**
-     * Fetches and processes an MPD (DASH) manifest.
-     * Returns the recommended refresh interval.
-     */
-    async fetchMpdManifest() {
-        const response = await axios.get(this.sourceUrl, { timeout: 3000 });
-        const manifest = parse(response.data);
-
-        if (!manifest.periods || manifest.periods.length === 0) {
-            console.warn('[Buffer-MPD] Source manifest is empty or invalid.');
-            if (this.rejectInitialPlaylist) {
-                this.rejectInitialPlaylist(new Error("Source MPD manifest is empty or invalid."));
-                this.rejectInitialPlaylist = null;
-            }
-            throw new Error("Empty or invalid MPD manifest");
-        }
-
-        // Determine base URL
-        this.segmentBaseUrl = new URL(manifest.baseURL || '.', this.sourceUrl).href;
-
-        // --- MODIFIED: Update segmentQueue with { url, filename } objects ---
-        const newSegmentQueue = [];
-        
-        for (const period of manifest.periods) {
-            for (const adaptationSet of period.adaptationSets) {
-                const segmentTemplate = adaptationSet.segmentTemplate;
-                if (segmentTemplate) {
-                    // Handle Initialization Segment
-                    if (segmentTemplate.initialization) {
-                        const initFilename = segmentTemplate.initialization.replace('$RepresentationID$', adaptationSet.id);
-                        const initUrl = new URL(initFilename, this.segmentBaseUrl).href;
-                        if (!this.segmentQueue.find(s => s.filename === initFilename)) {
-                             newSegmentQueue.push({ url: initUrl, filename: initFilename });
-                        }
-                    }
-
-                    // Handle Media Segments
-                    // This is a simplified parser for $Time$ templates. A full one is complex.
-                    // We will just grab the *template* URL and hope FFmpeg handles it.
-                    // This is a limitation; a full implementation would need to parse $Time$ and $Number$.
-                    // For now, we will just download segments listed.
-                    // Let's assume SegmentTimeline for now.
-                    if (segmentTemplate.segmentTimeline) {
-                        let currentTime = 0;
-                        for(const s of segmentTemplate.segmentTimeline) {
-                            for(let i = 0; i < (s.r || 0) + 1; i++) {
-                                const mediaFilename = segmentTemplate.media
-                                    .replace('$RepresentationID$', adaptationSet.id)
-                                    .replace('$Time$', currentTime);
-                                const mediaUrl = new URL(mediaFilename, this.segmentBaseUrl).href;
-                                newSegmentQueue.push({ url: mediaUrl, filename: mediaFilename });
-                                currentTime += s.d;
-                            }
-                        }
-                    } else if (segmentTemplate.media) {
-                         // Fallback for non-timeline templates (less common for live)
-                         // This is too complex to parse fully without more info.
-                         // We will rely on downloading the *init* segment and rewriting the manifest.
-                         // FFmpeg will hopefully read from our rewritten *relative* path.
-                    }
-                }
-            }
-        }
-        
-        // Only add init segments if they are not already downloaded
-        for (const segment of newSegmentQueue) {
-            if (!this.downloadedSegments.has(segment.filename)) {
-                this.segmentQueue.push(segment);
-            }
-        }
-        
-        // Prune segmentQueue to a reasonable size (e.g., last 20 segments)
-        if(this.segmentQueue.length > 20) {
-            this.segmentQueue = this.segmentQueue.slice(-20);
-        }
-
-        // Start downloading segments from the queue
-        this.downloadSegments();
-        // Write the local manifest for FFmpeg to read from
-        this.writeLocalMpdManifest(manifest);
-
-        // Resolve the promise only AFTER the first manifest is written
-        if (this.resolveInitialPlaylist) {
-            console.log('[Buffer-MPD] Initial MPD manifest is ready.');
-            this.resolveInitialPlaylist({ localManifestPath: this.localMpdManifestPath });
-            this.resolveInitialPlaylist = null;
-            this.rejectInitialPlaylist = null;
-        }
-
-        // Clean up old segments
-        this.cleanupOldSegments();
-
-        // Return refresh interval
-        const refreshSeconds = manifest.minimumUpdatePeriod || 5;
-        return (refreshSeconds * 1000) / 2; // Refresh at half duration
-    }
-
-
-    /**
-     * Generic segment downloader.
-     * Iterates this.segmentQueue and downloads new segments.
-     */
-    async downloadSegments() {
-        const segmentsToDownload = this.segmentQueue.filter(s => !this.downloadedSegments.has(s.filename));
-
-        for (const segment of segmentsToDownload) {
-            if (this.stopFlag) return;
-            
-            const localPath = path.join(this.bufferDir, segment.filename);
-            
-            // Create subdirectories if segment is in one (common in DASH)
-            const segmentDir = path.dirname(localPath);
-            if (!fs.existsSync(segmentDir)) {
-                fs.mkdirSync(segmentDir, { recursive: true });
-            }
-
-            try {
-                const response = await axios.get(segment.url, { responseType: 'stream', timeout: 5000 });
-                const writer = fs.createWriteStream(localPath);
-                response.data.pipe(writer);
-                
-                await new Promise((resolve, reject) => {
-                    writer.on('finish', resolve);
-                    writer.on('error', reject);
-                });
-
-                this.downloadedSegments.add(segment.filename);
-                // console.log(`[Buffer] Downloaded segment ${segment.filename}`);
-            } catch (error) {
-                console.warn(`[Buffer] Failed to download segment ${segment.filename}:`, error.message);
-                // Don't stop on single segment failure
-            }
-        }
-    }
-
-    /**
-     * Writes a local HLS playlist file for FFmpeg.
-     */
-    writeLocalHlsPlaylist(playlist) {
+    writeLocalHlsPlaylist(playlist, segments) {
         // Filter playlist to only segments we *actually* have downloaded
-        const availableSegments = playlist.segments.filter(s => this.downloadedSegments.has(s.uri.split('/').pop()));
+        const availableSegments = segments.filter(s => this.downloadedSegments.has(s.filename));
 
         // We only want the *end* of the available list, up to our target buffer size
         const bufferedSegments = availableSegments.slice(-this.targetBufferSegments);
         
         if (bufferedSegments.length === 0) {
-            // console.warn('[Buffer-HLS] No buffered segments available to write playlist.');
-            return;
+            console.warn('[Buffer] No buffered HLS segments available to write playlist.');
+            return; 
         }
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
         
-        const firstSegmentData = playlist.segments.find(s => s.uri.split('/').pop() === bufferedSegments[0].uri.split('/').pop());
-        const mediaSequence = firstSegmentData ? firstSegmentData.mediaSequence : (playlist.mediaSequence || 0);
-
-        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}\n`;
+        // Find the media sequence of the *first segment we are including*
+        m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${bufferedSegments[0].mediaSequence || 0}\n`;
 
         for (const segment of bufferedSegments) {
             if (segment.discontinuity) {
                 m3u8Content += '#EXT-X-DISCONTINUITY\n';
             }
             m3u8Content += `#EXTINF:${segment.duration.toFixed(6)},\n`;
-            // Point to the *relative path* that Nginx will serve from /var/www/hls/
-            m3u8Content += `buffer/${segment.uri.split('/').pop()}\n`; 
+            // Point to the *relative path* that Nginx will serve
+            m3u8Content += `buffer/${segment.filename}\n`; 
         }
 
+        // We are creating a non-live playlist for ffmpeg, so we add the endlist tag.
+        // FFmpeg is smart enough to reload this file when it changes.
+        // m3u8Content += '#EXT-X-ENDLIST\n'; 
+        // --- EDIT: Omit endlist, as it causes ffmpeg to exit. 
+        // FFmpeg's "-re" flag is what makes it a "live" input.
+
         try {
-             fs.writeFileSync(this.localHlsPlaylistPath, m3u8Content);
+             fs.writeFileSync(this.localManifestPath, m3u8Content);
         } catch (e) {
-            console.error('[Buffer-HLS] Failed to write local HLS playlist:', e.message);
+            console.error('[Buffer] Failed to write local HLS playlist:', e.message);
         }
     }
 
-    /**
-     * Writes a local MPD manifest file for FFmpeg.
-     */
-    writeLocalMpdManifest(manifest) {
-        try {
-            // Create a deep copy to avoid modifying the original
-            let localManifest = JSON.parse(JSON.stringify(manifest));
-            
-            // Remove baseURL, all paths will be relative to our buffer dir
-            delete localManifest.baseURL; 
 
-            for (const period of localManifest.periods) {
-                for (const adaptationSet of period.adaptationSets) {
-                    const segmentTemplate = adaptationSet.segmentTemplate;
-                    if (segmentTemplate) {
-                        // --- This is the key: Rewrite paths to point to our buffer directory ---
-                        if (segmentTemplate.initialization) {
-                            segmentTemplate.initialization = `buffer/${segmentTemplate.initialization}`;
-                        }
-                        if (segmentTemplate.media) {
-                            segmentTemplate.media = `buffer/${segmentTemplate.media}`;
-                        }
-                    }
-                }
+    // -------------------------------------------------
+    // --- MPD (DASH) Specific Logic ---
+    // -------------------------------------------------
+
+    async fetchMpdManifest() {
+        this.localManifestPath = path.join(HLS_DIR, 'local_manifest.mpd');
+        
+        const response = await axios.get(this.sourceUrl, { timeout: 3000 });
+        this.mpdManifest = mpdParser.parse(response.data, {
+            sourceUrl: this.sourceUrl // Pass sourceUrl to resolve relative paths
+        });
+
+        const segmentsToFetch = [];
+        const allSegmentFilenames = new Set();
+
+        // Iterate through all adaptations (video, audio)
+        this.mpdManifest.playlists.forEach(playlist => {
+            // Add init segment (e.g., init.mp4)
+            if (playlist.sidx && playlist.sidx.uri) {
+                const filename = playlist.sidx.uri.split('/').pop().split('?')[0];
+                segmentsToFetch.push({
+                    fullUri: new URL(playlist.sidx.uri, this.sourceBaseUrl).href,
+                    filename: filename
+                });
+                allSegmentFilenames.add(filename);
             }
 
-            // Convert the modified manifest object back to XML
-            const mpdContent = MpdStringify(localManifest);
-            fs.writeFileSync(this.localMpdManifestPath, mpdContent);
+            // Add all media segments
+            playlist.segments.forEach(segment => {
+                const filename = segment.uri.split('/').pop().split('?')[0];
+                segmentsToFetch.push({
+                    ...segment,
+                    fullUri: new URL(segment.uri, this.sourceBaseUrl).href,
+                    filename: filename
+                });
+                allSegmentFilenames.add(filename);
+            });
+        });
 
+        if (segmentsToFetch.length === 0) {
+            throw new Error("Source MPD manifest is empty or invalid.");
+        }
+
+        // Start downloading all segments
+        this.downloadSegments(segmentsToFetch);
+
+        // Write the local manifest file for FFmpeg
+        this.writeLocalMpdManifest();
+
+        // Resolve the promise if this is the first successful run
+        if (this.resolveInitialPlaylist) {
+            console.log('[Buffer] Initial MPD manifest is ready.');
+            this.resolveInitialPlaylist({ localManifestPath: this.localManifestPath });
+            this.resolveInitialPlaylist = null; 
+            this.rejectInitialPlaylist = null;
+        }
+
+        // Schedule the next fetch
+        const refreshInterval = (this.mpdManifest.minimumUpdatePeriod || 2) * 1000;
+        this.timeoutId = setTimeout(() => this.fetchManifest(), Math.max(1000, refreshInterval));
+    }
+
+    writeLocalMpdManifest() {
+        if (!this.mpdManifest) {
+            console.warn('[Buffer] No MPD manifest data to write.');
+            return;
+        }
+
+        // Deep-clone the manifest to avoid modifying the original
+        const localManifest = JSON.parse(JSON.stringify(this.mpdManifest));
+        let segmentsAvailable = false;
+
+        // This is the critical part: rewrite all segment URLs
+        localManifest.playlists.forEach(playlist => {
+            // Rewrite init segment URL
+            if (playlist.sidx && playlist.sidx.uri) {
+                const filename = playlist.sidx.uri.split('/').pop().split('?')[0];
+                if (this.downloadedSegments.has(filename)) {
+                    playlist.sidx.uri = `buffer/${filename}`;
+                    segmentsAvailable = true;
+                }
+            }
+            // Rewrite all media segment URLs
+            playlist.segments.forEach(segment => {
+                const filename = segment.uri.split('/').pop().split('?')[0];
+                 if (this.downloadedSegments.has(filename)) {
+                    segment.uri = `buffer/${filename}`;
+                    segmentsAvailable = true;
+                }
+            });
+        });
+
+        if (!segmentsAvailable) {
+            console.warn('[Buffer] No buffered MPD segments available to write manifest.');
+            return;
+        }
+        
+        try {
+            // Convert the modified JSON object back to XML
+            const manifestXml = mpdParser.toMpd(localManifest);
+            fs.writeFileSync(this.localManifestPath, manifestXml);
         } catch (e) {
-            console.error('[Buffer-MPD] Failed to write local MPD manifest:', e.message);
+            console.error('[Buffer] Failed to write local MPD manifest:', e.message);
+        }
+    }
+
+
+    // -------------------------------------------------
+    // --- Common Download & Cleanup Logic ---
+    // -------------------------------------------------
+
+    /**
+     * Downloads segments from a list of segment objects.
+     * @param {Array<Object>} segments - Array of segment objects, must have { fullUri, filename }
+     */
+    async downloadSegments(segments) {
+        const segmentsToDownload = [];
+        
+        for (const segment of segments) {
+            if (this.stopFlag) return;
+            if (!segment.filename) {
+                console.warn('[Buffer] Segment missing filename, skipping:', segment);
+                continue;
+            }
+            
+            if (!this.downloadedSegments.has(segment.filename)) {
+                segmentsToDownload.push(segment);
+            }
+        }
+        
+        // Run downloads in parallel (max 5 at a time)
+        const parallelLimit = 5;
+        for (let i = 0; i < segmentsToDownload.length; i += parallelLimit) {
+            if (this.stopFlag) return;
+            const chunk = segmentsToDownload.slice(i, i + parallelLimit);
+            await Promise.all(chunk.map(s => this.downloadSegment(s)));
+        }
+
+        // Clean up old segments
+        this.cleanupOldSegments(segments.map(s => s.filename));
+    }
+
+    /**
+     * Downloads a single segment and saves it.
+     */
+    async downloadSegment(segment) {
+        if (this.stopFlag || this.downloadedSegments.has(segment.filename)) {
+            return;
+        }
+
+        const localPath = path.join(this.bufferDir, segment.filename);
+
+        try {
+            const response = await axios.get(segment.fullUri, { 
+                responseType: 'stream', 
+                timeout: 5000 
+            });
+            const writer = fs.createWriteStream(localPath);
+            response.data.pipe(writer);
+            
+            await new Promise((resolve, reject) => {
+                writer.on('finish', resolve);
+                writer.on('error', reject);
+            });
+
+            this.downloadedSegments.add(segment.filename);
+        } catch (error) {
+            console.warn(`[Buffer] Failed to download segment ${segment.filename}:`, error.message);
+            // If download fails, delete the partial file
+            try {
+                if (fs.existsSync(localPath)) {
+                    fs.unlinkSync(localPath);
+                }
+            } catch (e) {}
         }
     }
 
     /**
-     * Generic segment cleanup logic.
+     * Cleans up segments that are no longer in the manifest.
      */
-    cleanupOldSegments() {
-        // This logic keeps our buffer folder from growing forever
-        const segmentsToKeep = new Set(this.segmentQueue.map(s => s.filename));
+    cleanupOldSegments(currentSegmentFilenames) {
+        const segmentsToKeep = new Set(currentSegmentFilenames); 
         
         for (const filename of this.downloadedSegments) {
             if (!segmentsToKeep.has(filename)) {
@@ -683,13 +697,11 @@ class BufferManager {
                     const localPath = path.join(this.bufferDir, filename);
                     if (fs.existsSync(localPath)) {
                         fs.unlinkSync(localPath);
-                        // console.log(`[Buffer] Cleaned up segment ${filename}`);
+                        console.log(`[Cleanup] Deleted stale segment: ${filename}`);
                     }
                     this.downloadedSegments.delete(filename);
                 } catch (e) {
-                    // This can fail if a segment is in a subdirectory, fs.unlinkSync won't delete the dir
-                    // We'll accept this minor disk leak for now, as the whole folder is deleted on stop.
-                    // console.warn(`[Buffer] Failed to cleanup segment ${filename}:`, e.message);
+                    console.warn(`[Cleanup] Failed to cleanup segment ${filename}:`, e.message);
                 }
             }
         }
@@ -703,7 +715,7 @@ class BufferManager {
 
 async function startStream(sourceUrl) {
     if (ffmpegProcess) {
-        console.log('Killing existing ffmpeg process...');
+        console.log('[Stream Start] Killing existing ffmpeg process...');
         stopAllStreamProcesses();
     }
 
@@ -712,56 +724,52 @@ async function startStream(sourceUrl) {
     const activeProfile = getActiveProfile();
     let streamInputUrl = sourceUrl;
     
-    // Check if we are restarting ourself (e.g., from a buffer)
-    const isLocalPlaylist = sourceUrl.includes('local_playlist.m3u8') || sourceUrl.includes('local_manifest.mpd');
-
-    // --- NEW: MPD/DASH Warning ---
-    // Check the *original* source URL for .mpd
-    if (sourceUrl.endsWith('.mpd') || sourceUrl.includes('.mpd?')) {
-        const testCommand = activeProfile.command.replace(/{streamUrl}/g, "").replace(/{userAgent}/g, "");
-        if (!testCommand.includes('-map')) {
-            console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
-            console.warn('[FFmpeg] WARNING: You are streaming an MPD (DASH) source without a "-map" flag.');
-            console.warn('[FFmpeg] This will likely fail by grabbing the lowest quality stream or exiting with an error.');
-            console.warn('[FFmpeg] Please use a profile that maps specific video/audio streams (e.g., -map 0:4 -map 0:5).');
-            console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
-        }
-    }
-
-    // --- MODIFIED: Buffer Logic now handles HLS and MPD ---
-    if (settings.buffer.enabled && !isLocalPlaylist) {
+    // Check if we are restarting FFmpeg against an already-running buffer
+    const isRestartingBuffer = sourceUrl.includes('local_playlist.m3u8') || sourceUrl.includes('local_manifest.mpd');
+    
+    // --- Buffer Logic (Now supports HLS & MPD) ---
+    if (settings.buffer.enabled && !isRestartingBuffer) {
         console.log('[Stream Start] Using Pre-fetch Buffer mode.');
         try {
             bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
             
-            // --- MODIFIED: This promise now returns a generic path ---
+            // Wait for the buffer to be ready
             const { localManifestPath } = await bufferManager.start();
             
-            // --- MODIFIED: Construct URL from the returned path ---
-            const manifestFilename = path.basename(localManifestPath);
-            streamInputUrl = `http://127.0.0.1:8994/${manifestFilename}`;
-            
+            // Point FFmpeg to the *local* manifest file served by Nginx
+            streamInputUrl = `http://127.0.0.1:8994/${path.basename(localManifestPath)}`;
             console.log(`[Stream Start] Buffer is ready. Pointing FFmpeg to: ${streamInputUrl}`);
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize:", error.message);
             stopAllStreamProcesses(); 
-            return;
+            return; // Don't start ffmpeg if buffer fails
         }
-    } else if (isLocalPlaylist) {
+    } else if (isRestartingBuffer) {
         console.log('[Stream Start] Restarting FFmpeg against existing buffer.');
     } else {
         console.log('[Stream Start] Using Direct Stream mode (Buffer disabled in settings).');
     }
 
+    // --- Profile & Command Logic ---
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
     
     const commandWithPlaceholders = activeProfile.command
         .replace(/{streamUrl}/g, streamInputUrl)
         .replace(/{userAgent}/g, userAgent);
 
+    // --- MPD/DASH Warning ---
+    if (sourceUrl.includes('.mpd') && !commandWithPlaceholders.includes('-map')) {
+        console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+        console.warn('[FFmpeg] WARNING: You are streaming an MPD (DASH) source without a "-map" flag.');
+        console.warn('[FFmpeg] This will likely fail by grabbing the lowest quality stream or exiting with an error.');
+        console.warn('[FFmpeg] Please use a profile that maps specific video/audio streams (e.g., -map 0:4 -map 0:5).');
+        console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+    }
+
+    // Split command string into arguments, respecting quotes
     const args = (commandWithPlaceholders.match(/(?:[^\s"]+|"[^"]*")+/g) || [])
-                 .map(arg => arg.replace(/^"|"$/g, ''));
+                 .map(arg => arg.replace(/^"|"$/g, '')); // Remove surrounding quotes
     
     console.log(`[FFmpeg] Starting process with command: ffmpeg ${args.join(' ')}`);
 
@@ -774,26 +782,28 @@ async function startStream(sourceUrl) {
 
     ffmpegProcess.stderr.on('data', (data) => {
         const stderrStr = data.toString();
-        // Suppress verbose logs
-        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && 
-            !stderrStr.startsWith('Opening') && !stderrStr.includes('dropping overlapping extension') &&
-            !stderrStr.includes('dropping stale segment')) {
+        // Filter out noisy progress messages
+        if (!stderrStr.startsWith('frame=') && !stderrStr.startsWith('size=') && !stderrStr.startsWith('Opening') && !stderrStr.includes('dropping overlapping extension')) {
              console.error(`[ffmpeg stderr]: ${stderrStr.trim()}`);
         }
     });
 
     ffmpegProcess.on('close', (code) => {
         console.log(`[ffmpeg] process exited with code ${code}`);
-        let safeToStop = true;
-        if (code !== 0 && code !== 255) { // 255 is normal kill
+        let safeToStop = true; // Flag to prevent recursion
+        
+        // 255 is 'killed by user' (e.g., from /api/stop)
+        if (code !== 0 && code !== 255) { 
+            // If ffmpeg failed and the buffer is still running, try to restart ffmpeg
             if (bufferManager && bufferManager.stopFlag === false) {
                 console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
-                safeToStop = false;
+                safeToStop = false; // Don't stop buffer, we are restarting
                 startStream(streamInputUrl); // Pass the LOCAL manifest URL to restart
             }
         }
         
-        if (safeToStop && ffmpegProcess) {
+        // If it's safe to stop (e.g., clean exit) or if buffer isn't running
+        if (safeToStop && ffmpegProcess) { 
             stopAllStreamProcesses();
         }
     });
@@ -806,13 +816,14 @@ async function startStream(sourceUrl) {
 
 
 // ================================================================
-// --- ORIGINAL AUTH & API ENDPOINTS ---
+// --- ORIGINAL AUTH & API ENDPOINTS (MODIFIED) ---
 // ================================================================
 
 // --- Auth API Endpoints ---
 
 app.get('/api/auth/check', (req, res) => {
     db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
+        // --- FIX #1: Corrected typo 5R00 to 500 ---
         if (err) return res.status(500).json({ error: 'Database error' });
         const hasUsers = row.count > 0;
         if (req.session.userId) {
@@ -919,7 +930,7 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
     });
 });
 
-// --- Stream API Endpoints ---
+// --- Stream API Endpoints (NOW MODIFIED) ---
 
 app.post('/api/start', isAuthenticated, (req, res) => {
     const { url } = req.body;
@@ -938,6 +949,9 @@ app.post('/api/start', isAuthenticated, (req, res) => {
     }
 
     try {
+        // --- MODIFIED ---
+        // We no longer wait for startStream, as it's now async and has a buffer warmup.
+        // We start it and return success immediately. The UI will show loading.
         startStream(url); 
         res.json({ message: 'Stream process initiated successfully' });
     } catch (error) {
@@ -946,16 +960,16 @@ app.post('/api/start', isAuthenticated, (req, res) => {
 });
 
 app.post('/api/stop', isAuthenticated, (req, res) => {
-    console.log('Stopping stream via API request...');
-    stopAllStreamProcesses(); 
+    console.log('[API] Received /api/stop request.');
+    stopAllStreamProcesses(); // Use our new global stop function
 
     try {
         fs.writeFileSync(HLS_LOG_PATH, '', 'utf8');
         fs.writeFileSync(BLOCKLIST_PATH, '', 'utf8');
-        console.log('Cleared HLS log and blocklist on stream stop.');
+        console.log('[API] Cleared HLS log and blocklist on stream stop.');
         reloadNginx();
     } catch (writeErr) {
-        console.error('Failed to clear logs or blocklist:', writeErr);
+        console.error('[API] Failed to clear logs or blocklist:', writeErr);
     }
     
     res.json({ message: 'Stream stopped' });
@@ -963,14 +977,15 @@ app.post('/api/stop', isAuthenticated, (req, res) => {
 
 app.get('/api/status', isAuthenticated, (req, res) => {
     res.json({ 
-        running: (ffmpegProcess !== null || bufferManager !== null),
+        running: (ffmpegProcess !== null || bufferManager !== null), // Stream is "running" if buffer or ffmpeg is active
         url: currentStreamUrl 
     });
 });
 
 app.get('/api/viewers', isAuthenticated, (req, res) => {
+    // MODIFIED: Check buffer OR ffmpeg process
     if (ffmpegProcess === null && bufferManager === null) {
-        return res.json([]);
+        return res.json([]); // No stream running, no viewers
     }
     let blockedIps = new Set();
     try {
@@ -981,11 +996,12 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
             }
         });
     } catch (readErr) {
-        // Non-fatal
+        // Non-fatal, just log
     }
 
     fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
         if (err) {
+            // Non-fatal, just return empty
             return res.json([]);
         }
 
@@ -1046,3 +1062,4 @@ app.get('/', (req, res) => {
 app.listen(port, '127.0.0.1', () => {
     console.log(`Stream control API listening on port ${port}`);
 });
+
