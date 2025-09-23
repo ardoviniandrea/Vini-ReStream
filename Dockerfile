@@ -5,13 +5,15 @@ FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Node.js and build essentials
-# --- MODIFIED: Added python3 for node-gyp (build tool for sqlite3/bcrypt) ---
+# --- MODIFIED: Added python3, libsqlite3-dev, and pkg-config for sqlite3 compilation ---
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     gnupg \
-    python3 && \
+    python3 \
+    libsqlite3-dev \
+    pkg-config && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
@@ -81,3 +83,4 @@ EXPOSE 8994
 
 # Start supervisord as the main command (as root)
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+
