@@ -15,7 +15,7 @@
     "bcryptjs": "^2.4.3",
     "connect-sqlite3": "^0.9.15",
     "express-session": "^1.18.0",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "xml-js": "^1.6.11"
   }
 }
-
