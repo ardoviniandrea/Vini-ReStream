@@ -366,10 +366,17 @@ class BufferManager {
             this.rejectInitialManifest = reject;
         });
 
-        const urlObj = new URL(this.sourceUrl);
-        // Set the base URL to the directory containing the manifest
-        urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
-        this.sourceBaseUrl = urlObj.toString();
+        try {
+            const urlObj = new URL(this.sourceUrl);
+            // Set the base URL to the directory containing the manifest
+            urlObj.pathname = urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+            this.sourceBaseUrl = urlObj.toString();
+        } catch (e) {
+            console.error(`[Buffer] Invalid source URL: ${this.sourceUrl}`, e.message);
+            this.rejectInitialManifest(new Error(`Invalid source URL: ${e.message}`));
+            return this.initialManifestReady;
+        }
+
 
         this.fetchManifest(); 
         return this.initialManifestReady; 
@@ -412,6 +419,10 @@ class BufferManager {
 
     async fetchHlsManifest() {
         const response = await axios.get(this.sourceUrl, { timeout: 5000 });
+        
+        // Check if we were stopped *during* the download
+        if (this.stopFlag) return; 
+        
         const parser = new HlsParser();
         parser.push(response.data);
         parser.end();
@@ -448,6 +459,9 @@ class BufferManager {
 
         await this.downloadSegments(segments); 
         
+        // Check if we were stopped *during* segment downloading
+        if (this.stopFlag) return; 
+
         const manifestWritten = this.writeLocalHlsPlaylist(playlist, segments);
 
         if (this.resolveInitialManifest && manifestWritten) {
@@ -479,8 +493,10 @@ class BufferManager {
 
         let m3u8Content = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(playlist.targetDuration)}\n`;
         
+        // Use the mediaSequence from the *first* segment we are including
         const firstSegment = bufferedSegments[0];
-        const mediaSequence = firstSegment.mediaSequence || (firstSegment.timeline ? firstSegment.timeline : 0);
+        // Ensure mediaSequence is an integer. Fallback to 0.
+        const mediaSequence = firstSegment.mediaSequence ? parseInt(firstSegment.mediaSequence, 10) : (playlist.mediaSequence || 0);
         m3u8Content += `#EXT-X-MEDIA-SEQUENCE:${mediaSequence}\n`;
 
         for (const segment of bufferedSegments) {
@@ -496,7 +512,10 @@ class BufferManager {
              fs.writeFileSync(this.localManifestPath, m3u8Content);
              return true;
         } catch (e) {
-            console.error('[Buffer] Failed to write local HLS playlist:', e.message);
+             // If writing fails (e.g., directory deleted), just log it.
+            if (!this.stopFlag) { // Don't log expected errors on stop
+                console.error('[Buffer] Failed to write local HLS playlist:', e.message);
+            }
             return false;
         }
     }
@@ -508,6 +527,10 @@ class BufferManager {
 
     async fetchMpdManifest() {
         const response = await axios.get(this.sourceUrl, { timeout: 5000 });
+        
+        // Check if we were stopped *during* the download
+        if (this.stopFlag) return; 
+
         const manifestXml = response.data; // Keep the raw XML for rewriting
         
         const mpdManifest = mpdParser.parse(manifestXml, {
@@ -540,6 +563,9 @@ class BufferManager {
         // 2. Download all identified segments
         await this.downloadSegments(segmentsToFetch);
         
+        // Check if we were stopped *during* segment downloading
+        if (this.stopFlag) return; 
+
         // 3. Rewrite the raw XML manifest to point to local files
         const manifestWritten = this.writeLocalMpdManifest(manifestXml);
 
@@ -644,7 +670,9 @@ class BufferManager {
             console.log(`[Buffer] Successfully wrote local MPD manifest. Rewrote ${segmentCount} segment references.`);
             return true;
         } catch (e) {
-            console.error('[Buffer] Failed to write local MPD manifest:', e.message);
+            if (!this.stopFlag) { // Don't log expected errors on stop
+                console.error('[Buffer] Failed to write local MPD manifest:', e.message);
+            }
             return false;
         }
     }
@@ -692,56 +720,106 @@ class BufferManager {
     /**
      * Downloads a single segment and saves it.
      * FIX: Ensures directory existence for robustness (addressing ENOENT).
+     * *** THIS IS THE CORE FIX FOR THE RACE CONDITION ***
      */
     async downloadSegment(segment) {
-        // *** BEGIN BUFFER FIX ***
-        // Check .has() on the Map
+        // Check 1: At the top
         if (this.stopFlag || this.downloadedSegments.has(segment.filename)) {
-        // *** END BUFFER FIX ***
             return;
         }
 
         const localPath = path.join(this.bufferDir, segment.filename);
         
-        // Defensive check: Ensure the buffer directory exists before attempting to write (FIX for ENOENT)
+        // Defensive check 1: Ensure buffer directory exists before *starting*.
         try {
             if (!fs.existsSync(this.bufferDir)) {
-                 fs.mkdirSync(this.bufferDir, { recursive: true });
+                 // If the dir doesn't exist, it might have been cleaned up.
+                 if (!this.stopFlag) {
+                    // This case should ideally not happen, but if it does, recreate it.
+                    console.warn('[Buffer] Buffer directory missing, recreating...');
+                    fs.mkdirSync(this.bufferDir, { recursive: true });
+                 } else {
+                    // If stopFlag is true, the cleanup job ran. Just abort.
+                    return;
+                 }
             }
         } catch(e) {
+            // This catches errors from mkdirSync
             console.error('[Buffer] CRITICAL: Failed to ensure buffer directory exists:', e.message);
             return; 
         }
 
-
+        let response;
         try {
-            const response = await axios.get(segment.fullUri, { 
+            // 1. Get the stream
+            response = await axios.get(segment.fullUri, { 
                 responseType: 'stream', 
                 timeout: 5000 
             });
+
+            // 2. Check flag *after* HTTP request, *before* writing
+            if (this.stopFlag) {
+                // console.log(`[Buffer] Download for ${segment.filename} cancelled post-fetch.`); // Too noisy
+                response.data.destroy(); // Abort the stream
+                return;
+            }
+
+            // 3. Try to write
             const writer = fs.createWriteStream(localPath);
             response.data.pipe(writer);
             
             await new Promise((resolve, reject) => {
                 writer.on('finish', resolve);
-                writer.on('error', reject);
+                writer.on('error', (err) => {
+                    // This will catch the ENOENT if the dir is deleted mid-write
+                    // This is the error you are seeing in the logs.
+                    if (!this.stopFlag) { // Don't log expected errors on stop
+                        console.warn(`[Buffer] Write error for ${segment.filename}: ${err.message}`);
+                    }
+                    reject(err);
+                });
+                response.data.on('error', (err) => {
+                    // This catches download errors
+                    if (!this.stopFlag) {
+                        console.warn(`[Buffer] Download stream error for ${segment.filename}: ${err.message}`);
+                    }
+                    reject(err);
+
+                });
             });
 
-            // *** BEGIN BUFFER FIX ***
-            // Add filename and current timestamp to Map
+            // 4. Check flag *after* write, *before* adding to Map
+            if (this.stopFlag) {
+                // console.log(`[Buffer] Write for ${segment.filename} complete, but manager stopped. Discarding.`); // Too noisy
+                try { fs.unlinkSync(localPath); } catch(e) {} // Clean up the file
+                return;
+            }
+
+            // 5. Success
             this.downloadedSegments.set(segment.filename, Date.now());
-            // *** END BUFFER FIX ***
+
         } catch (error) {
-            // Note: Akamai links often fail quickly if the token expires before the manifest fetches the segments.
-            console.warn(`[Buffer] Failed to download segment ${segment.filename}:`, error.message);
+            // This catches axios errors (like timeouts) AND writer/stream errors
+            if (!this.stopFlag) { // Don't log expected errors on stop
+                console.warn(`[Buffer] Failed to download/write segment ${segment.filename}:`, error.message);
+            }
+            
+            // Abort the download stream if it exists
+            if (response && response.data && response.data.destroy) {
+                response.data.destroy();
+            }
+
             // Delete partial file on failure
             try {
                 if (fs.existsSync(localPath)) {
                     fs.unlinkSync(localPath);
                 }
-            } catch (e) {}
+            } catch (e) {
+                // Ignore cleanup errors
+            }
         }
     }
+
 
     /**
      * *** BEGIN BUFFER FIX ***
@@ -790,6 +868,9 @@ async function startStream(sourceUrl) {
         console.log('[Stream Start] Killing existing ffmpeg process...');
         stopAllStreamProcesses();
     }
+    
+    // Ensure cleanup is finished from any previous run before starting.
+    cleanupStreamFiles();
 
     console.log(`[Stream Start] Starting stream from: ${sourceUrl}`);
     const settings = getSettings();
@@ -797,16 +878,28 @@ async function startStream(sourceUrl) {
     let streamInputUrl = sourceUrl;
     
     // Check if we are restarting FFmpeg against an already-running buffer
+    // This logic path should no longer be hit if startStream always cleans up,
+    // but we'll keep it for robustness.
     const isRestartingBuffer = sourceUrl.includes('local_playlist.m3u8') || sourceUrl.includes('local_manifest.mpd');
     
     // --- Buffer Logic (Now supports HLS & MPD via local manifest) ---
     if (settings.buffer.enabled && !isRestartingBuffer) {
         console.log('[Stream Start] Using Pre-fetch Buffer mode.');
         try {
+            // Create a new manager. This also creates the clean buffer dir.
             bufferManager = new BufferManager(sourceUrl, settings.buffer.delaySeconds);
             
             // Wait for the buffer to be ready
             const promiseResult = await bufferManager.start();
+
+            // *** RACE CONDITION FIX ***
+            // If the bufferManager was stopped *while* we were waiting for it to start,
+            // (e.g., user clicked Stop immediately), we must abort.
+            if (bufferManager && bufferManager.stopFlag) {
+                console.log('[Stream Start] Buffer start was cancelled. Aborting FFmpeg launch.');
+                // stopAllStreamProcesses() will be called by the /api/stop handler
+                return; 
+            }
             
             // Point FFmpeg to the *local* manifest file served by Nginx
             streamInputUrl = `http://127.0.0.1:8994/${path.basename(promiseResult.localManifestPath)}`;
@@ -814,8 +907,16 @@ async function startStream(sourceUrl) {
 
         } catch (error) {
             console.error("[Stream Start] Buffer Manager failed to initialize. Aborting stream start.");
+            if (bufferManager && !bufferManager.stopFlag) {
+                // Only log if it wasn't an intentional stop
+                console.error(error.message);
+            }
             bufferManager = null; 
-            throw new Error(`Buffer initialization failed: ${error.message}`);
+            // We throw the error *only* if it wasn't an intentional stop
+            if (!bufferManager || !bufferManager.stopFlag) {
+                throw new Error(`Buffer initialization failed: ${error.message}`);
+            }
+            return; // Abort if it was stopped
         }
     } else if (isRestartingBuffer) {
         console.log('[Stream Start] Restarting FFmpeg against existing buffer.');
@@ -859,18 +960,28 @@ async function startStream(sourceUrl) {
 
     ffmpegProcess.on('close', (code) => {
         console.log(`[ffmpeg] process exited with code ${code}`);
-        let safeToStop = true; 
         
-        if (code !== 0 && code !== 255) { 
-            if (bufferManager && bufferManager.stopFlag === false) {
+        const wasStoppedIntentionally = (bufferManager ? bufferManager.stopFlag : true);
+        
+        if (code !== 0 && code !== 255 && !wasStoppedIntentionally) { 
+            // Unintentional crash
+            if (bufferManager) {
                 console.warn('[ffmpeg] Process failed. Attempting to restart FFmpeg against buffer...');
-                safeToStop = false; 
+                // We restart FFmpeg, but not the whole buffer manager
                 startStream(streamInputUrl); 
+            } else {
+                // Direct stream failed
+                console.warn('[ffmpeg] Direct stream failed. Stopping.');
+                stopAllStreamProcesses();
             }
-        }
-        
-        if (safeToStop && ffmpegProcess) { 
-            stopAllStreamProcesses();
+        } else {
+            // Process exited cleanly (0) or was killed (255) or was stopped intentionally
+            if (ffmpegProcess) { // Check if it hasn't already been nullified
+                ffmpegProcess = null; // Mark as stopped
+                if (wasStoppedIntentionally) {
+                    console.log('[ffmpeg] Process stopped intentionally.');
+                }
+            }
         }
     });
 
@@ -999,8 +1110,8 @@ app.delete('/api/users/:id', isAuthenticated, (req, res) => {
 
 app.post('/api/start', isAuthenticated, async (req, res) => {
     const { url } = req.body;
-    if (!url) {
-        return res.status(400).json({ error: 'Missing "url" in request body' });
+    if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+        return res.status(400).json({ error: 'Invalid or missing "url" in request body' });
     }
 
     // Clear old logs and blocklist
@@ -1045,13 +1156,13 @@ app.post('/api/stop', isAuthenticated, (req, res) => {
 
 app.get('/api/status', isAuthenticated, (req, res) => {
     res.json({ 
-        running: (ffmpegProcess !== null || bufferManager !== null), 
+        running: (ffmpegProcess !== null || (bufferManager !== null && !bufferManager.stopFlag)), 
         url: currentStreamUrl 
     });
 });
 
 app.get('/api/viewers', isAuthenticated, (req, res) => {
-    if (ffmpegProcess === null && bufferManager === null) {
+    if (ffmpegProcess === null && (bufferManager === null || bufferManager.stopFlag)) {
         return res.json([]); 
     }
     let blockedIps = new Set();
@@ -1063,12 +1174,16 @@ app.get('/api/viewers', isAuthenticated, (req, res) => {
             }
         });
     } catch (readErr) {
-        // Non-fatal, just log
+        if (readErr.code !== 'ENOENT') {
+             console.warn('[Viewers] Failed to read blocklist:', readErr.message);
+        }
     }
 
     fs.readFile(HLS_LOG_PATH, 'utf8', (err, data) => {
         if (err) {
-            return res.json([]);
+            if (err.code === 'ENOENT') return res.json([]); // No logs yet
+            console.error('[Viewers] Failed to read HLS logs:', err.message);
+            return res.status(500).json({ error: 'Failed to read log file' });
         }
 
         const lines = data.split('\n').filter(line => line.trim() !== '');
