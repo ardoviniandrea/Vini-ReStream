@@ -1,72 +1,77 @@
-# Use the official NVIDIA CUDA base image for potential GPU acceleration
-# Note: For production, you should use a more minimal image like ubuntu:latest or debian:stable 
-# if you do not require CUDA/FFmpeg or specialized libraries.
-FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+# Stage 1: The Builder (For Node.js dependencies compilation)
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 
-# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
-ENV NODE_VERSION=18
 
-# Install dependencies (Node.js, FFmpeg, Nginx, Supervisor)
-RUN apt-get update && apt-get install -y \
-    wget \
-    curl \
-    git \
+# Install Node.js and build essentials (needed for node-gyp dependencies like sqlite3)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
+    gnupg \
+    python3 \
+    libsqlite3-dev \
+    pkg-config && \
+    # Install Node.js 20.x from NodeSource
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory and copy package files
+WORKDIR /usr/src/app
+COPY app/package*.json ./
+
+# Install all dependencies for the app
+RUN npm install
+
+# Copy all app source code so it's included in the builder stage
+COPY app/ .
+
+# ---
+# Stage 2: The Final Runtime Image
+# Use a smaller CUDA 'base' image for the runtime environment.
+FROM nvidia/cuda:12.2.2-base-ubuntu22.04
+
+ENV NVIDIA_DRIVER_CAPABILITIES all
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies: Node.js, FFmpeg, Nginx, Supervisor, SQLite, and ca-certs
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    gnupg \
     ffmpeg \
     nginx \
     supervisor \
-    libssl-dev \
-    zlib1g-dev \
-    libsqlite3-dev \
-    xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+    sqlite3 \
+    ca-certificates && \
+    # Re-install Node.js runtime environment (using the correct method from original file)
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install Node.js
-RUN set -ex \
-    && ARCH= \
-    && case "$(dpkg --print-architecture)" in \
-      amd64) ARCH='x64' ;; \
-      arm64) ARCH='arm64' ;; \
-      *) echo 'unsupported arch' && exit 1 ;; \
-    esac \
-    && cd /tmp \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
-    && tar -xJf "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
-    && ln -s /usr/local/bin/node /usr/local/bin/nodejs
+# Create and set the working directory
+WORKDIR /usr/src/app
 
-# --- APPLICATION SETUP ---
-# Create directory for HLS segments (served by Nginx)
-RUN mkdir -p /var/www/hls
+# Copy the application files and node_modules from the 'builder' stage
+COPY --from=builder /usr/src/app .
 
-# Create directory for Node.js app
-WORKDIR /app
-
-# Copy application files
-COPY app/package.json .
-COPY app/server.js .
-COPY app/public ./public
+# Copy Nginx and Supervisor configs
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY nginx/nginx.conf /etc/nginx/sites-available/default
-RUN ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default \
-    && rm -f /etc/nginx/sites-enabled/default.conf
 
-# Create a place for persistent data (database, settings)
-RUN mkdir -p /data
-VOLUME /data
+# Create directories for HLS, logs, and persistent data
+RUN mkdir -p /var/www/hls && \
+    mkdir -p /data && \
+    mkdir -p /var/log/nginx && \
+    touch /var/log/nginx/hls_access.log && \
+    touch /etc/nginx/blocklist.conf
 
-# Create log directories for Nginx HLS access and blocklist
-RUN mkdir -p /var/log/nginx \
-    && touch /var/log/nginx/hls_access.log \
-    && touch /etc/nginx/blocklist.conf
-
-# Install Node.js dependencies (CRITICAL: Added after package.json copy)
-RUN npm install
-
-# Expose both Nginx stream port (8994) and API port (8995)
-EXPOSE 8994
+# Expose both ports (UI/API on 8995, Stream on 8994)
 EXPOSE 8995
+EXPOSE 8994
 
-# Start supervisor which will run Nginx and the Node.js server
+# Start supervisord as the main command (as root, required for Nginx/Supervisor)
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
