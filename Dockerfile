@@ -1,11 +1,9 @@
-# Stage 1: The Builder (Based on your T104 reference for CUDA)
-# Use the full CUDA development image to build dependencies.
+# Stage 1: The Builder (For Node.js dependencies compilation)
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Node.js and build essentials
-# --- MODIFIED: Added python3, libsqlite3-dev, and pkg-config for sqlite3 compilation ---
+# Install Node.js and build essentials (needed for node-gyp dependencies like sqlite3)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -14,6 +12,7 @@ RUN apt-get update && \
     python3 \
     libsqlite3-dev \
     pkg-config && \
+    # Install Node.js 20.x from NodeSource
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
@@ -24,14 +23,12 @@ WORKDIR /usr/src/app
 COPY app/package*.json ./
 
 # Install all dependencies for the app
-# This is where the GitHub Action was failing
 RUN npm install
 
-# Copy all app source code
+# Copy all app source code so it's included in the builder stage
 COPY app/ .
 
 # ---
-
 # Stage 2: The Final Runtime Image
 # Use a smaller CUDA 'base' image for the runtime environment.
 FROM nvidia/cuda:12.2.2-base-ubuntu22.04
@@ -49,6 +46,7 @@ RUN apt-get update && \
     supervisor \
     sqlite3 \
     ca-certificates && \
+    # Re-install Node.js runtime environment (using the correct method from original file)
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
@@ -65,22 +63,15 @@ COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Create directories for HLS, logs, and persistent data
-# Give ownership to the 'node' user for directories that the node app *might* need
-# but the main processes will run as root.
 RUN mkdir -p /var/www/hls && \
     mkdir -p /data && \
     mkdir -p /var/log/nginx && \
     touch /var/log/nginx/hls_access.log && \
     touch /etc/nginx/blocklist.conf
 
-# Expose the ports
+# Expose both ports (UI/API on 8995, Stream on 8994)
 EXPOSE 8995
 EXPOSE 8994
 
-# NOTE: We are NOT setting 'USER node' here.
-# The container will run as ROOT, which is required for Supervisor
-# to launch Nginx and for the Node process to write to the /data volume.
-
-# Start supervisord as the main command (as root)
+# Start supervisord as the main command (as root, required for Nginx/Supervisor)
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
-
