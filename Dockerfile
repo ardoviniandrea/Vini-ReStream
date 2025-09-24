@@ -1,86 +1,72 @@
-# Stage 1: The Builder (Based on your T104 reference for CUDA)
-# Use the full CUDA development image to build dependencies.
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+# Use the official NVIDIA CUDA base image for potential GPU acceleration
+# Note: For production, you should use a more minimal image like ubuntu:latest or debian:stable 
+# if you do not require CUDA/FFmpeg or specialized libraries.
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
+# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_VERSION=18
 
-# Install Node.js and build essentials
-# --- MODIFIED: Added python3, libsqlite3-dev, and pkg-config for sqlite3 compilation ---
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# Install dependencies (Node.js, FFmpeg, Nginx, Supervisor)
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    git \
     build-essential \
-    curl \
-    gnupg \
-    python3 \
-    libsqlite3-dev \
-    pkg-config && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set working directory and copy package files
-WORKDIR /usr/src/app
-COPY app/package*.json ./
-
-# Install all dependencies for the app
-# This is where the GitHub Action was failing
-RUN npm install
-
-# Copy all app source code
-COPY app/ .
-
-# ---
-
-# Stage 2: The Final Runtime Image
-# Use a smaller CUDA 'base' image for the runtime environment.
-FROM nvidia/cuda:12.2.2-base-ubuntu22.04
-
-ENV NVIDIA_DRIVER_CAPABILITIES all
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install runtime dependencies: Node.js, FFmpeg, Nginx, Supervisor, SQLite, and ca-certs
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    curl \
-    gnupg \
     ffmpeg \
     nginx \
     supervisor \
-    sqlite3 \
-    ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    libssl-dev \
+    zlib1g-dev \
+    libsqlite3-dev \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create and set the working directory
-WORKDIR /usr/src/app
+# Install Node.js
+RUN set -ex \
+    && ARCH= \
+    && case "$(dpkg --print-architecture)" in \
+      amd64) ARCH='x64' ;; \
+      arm64) ARCH='arm64' ;; \
+      *) echo 'unsupported arch' && exit 1 ;; \
+    esac \
+    && cd /tmp \
+    && curl -fsSLO --compressed "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
+    && tar -xJf "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
+    && rm "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" \
+    && ln -s /usr/local/bin/node /usr/local/bin/nodejs
 
-# Copy the application files and node_modules from the 'builder' stage
-COPY --from=builder /usr/src/app .
+# --- APPLICATION SETUP ---
+# Create directory for HLS segments (served by Nginx)
+RUN mkdir -p /var/www/hls
 
-# Copy Nginx and Supervisor configs
-COPY nginx/nginx.conf /etc/nginx/nginx.conf
+# Create directory for Node.js app
+WORKDIR /app
+
+# Copy application files
+COPY app/package.json .
+COPY app/server.js .
+COPY app/public ./public
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY nginx/nginx.conf /etc/nginx/sites-available/default
+RUN ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default \
+    && rm -f /etc/nginx/sites-enabled/default.conf
 
-# Create directories for HLS, logs, and persistent data
-# Give ownership to the 'node' user for directories that the node app *might* need
-# but the main processes will run as root.
-RUN mkdir -p /var/www/hls && \
-    mkdir -p /data && \
-    mkdir -p /var/log/nginx && \
-    touch /var/log/nginx/hls_access.log && \
-    touch /etc/nginx/blocklist.conf
+# Create a place for persistent data (database, settings)
+RUN mkdir -p /data
+VOLUME /data
 
-# Expose the ports
-EXPOSE 8995
+# Create log directories for Nginx HLS access and blocklist
+RUN mkdir -p /var/log/nginx \
+    && touch /var/log/nginx/hls_access.log \
+    && touch /etc/nginx/blocklist.conf
+
+# Install Node.js dependencies (CRITICAL: Added after package.json copy)
+RUN npm install
+
+# Expose both Nginx stream port (8994) and API port (8995)
 EXPOSE 8994
+EXPOSE 8995
 
-# NOTE: We are NOT setting 'USER node' here.
-# The container will run as ROOT, which is required for Supervisor
-# to launch Nginx and for the Node process to write to the /data volume.
-
-# Start supervisord as the main command (as root)
+# Start supervisor which will run Nginx and the Node.js server
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
-
